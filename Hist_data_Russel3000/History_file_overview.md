@@ -78,6 +78,14 @@ Only RICs included in `rics_20260214.json` are stored here. The file for the ful
 
 ------
 
+### 7. `Price-Earning`
+
+These files are the **historical P/E data for the selected RICs** (i.e., those meeting the ADV requirement) using `TR.PE`.
+
+Only RICs included in `rics_20260214.json` are stored here. The file for the full index will be generated but that takes longer.
+
+------
+
 ## Summary of Workflow
 
 1. Start from full Russell 3000 historical data
