@@ -86,6 +86,12 @@ Only RICs included in `rics_20260214.json` are stored here. The file for the ful
 
 ------
 
+### 8. `Daily_new_data`
+
+Data we need with updates from 2026-02-12.
+
+------
+
 ## Summary of Workflow
 
 1. Start from full Russell 3000 historical data

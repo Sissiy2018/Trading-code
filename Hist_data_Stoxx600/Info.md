@@ -1,0 +1,2 @@
+This folder contains the code and processed data for the **Stoxx 600 index** analysis.
+We no longer include the `ADV_filtered` files as over past 75 days, 583 out of 600 stockes reaches the ADV threshold.
