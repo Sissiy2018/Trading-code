@@ -43,4 +43,3 @@ final_signals = blender.blend(short_signals, long_signals, pca_signals, data.hed
 final_signals.iloc[:,:2].plot(figsize=(14, 6), lw=1.5, title='Sample of Final Blended Signals')
 print(f"  Signal coverage: {final_signals.notna().any(axis=1).sum()} / {len(final_signals)} days")
 
-t
