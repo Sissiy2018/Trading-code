@@ -43,7 +43,7 @@ PE_FILES = [
 
 SP_FILES = [
     os.path.join(SP_DIR, 'lseg_historyprice_S&P500_20260215_to_20151209.csv'),
-    os.path.join(NEW_DATA_DIR, 'lseg_historyprice_S&P_now_to_20260212.csv')
+    os.path.join(NEW_DATA_DIR, 'lseg_historyprice_S&P500_now_to_20260212.csv')
 ]
 STATIC_FILE = os.path.join(STATIC_DIR, 'lseg_static_data_20260216.csv')
 
