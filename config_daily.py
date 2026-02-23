@@ -81,7 +81,7 @@ EU_PE_FILES = [
     os.path.join(NEW_EUR_DATA_DIR, 'stoxx_Price-Earning_data_now_to_20260219.csv')
 ]
 
-EU_FX_FILE = [os.path.join(EU_BASE_DIR, 'History_currency', 'currency_data_20260219_to_20150101.csv'),
+EU_FX_FILES = [os.path.join(EU_BASE_DIR, 'History_currency', 'currency_data_20260219_to_20150101.csv'),
               os.path.join(NEW_EUR_DATA_DIR, 'currency_data_now_to_20260219.csv')]
 EU_BENCHMARK_FILES = [
     os.path.join(EU_BASE_DIR, 'Eurostoxx50','stoxx_historyprice_Eurostoxx50_20260220_to_20150101.csv'),

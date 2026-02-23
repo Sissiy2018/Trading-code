@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 from preprocessing import DataProcessor, EuropeanDataProcessor
-import config
+import config_daily as config
 
 @dataclass
 class MarketData:
@@ -78,7 +78,8 @@ class PipelineDataLoader:
             sectors=sectors,
             benchmark_series=benchmark_series
         )
-    
+
+
 class EuropeanDataLoader:
     """Dedicated loader that handles cross-currency normalization to USD."""
     def __init__(self, benchmark_ticker='SX5E'):
@@ -93,7 +94,7 @@ class EuropeanDataLoader:
 
     def fetch_all(self):
         print("1/5 Loading and Processing FX Data...")
-        fx_multipliers = self.processor.process_fx(config.EU_FX_FILE)
+        fx_multipliers = self.processor.process_fx(config.EU_FX_FILES)
 
         print("2/5 Loading EU Price Data and converting to USD...")
         price_usd, price_ret, tot_ret, div_ret, volume_usd, currency_dict = self.processor.load_and_pivot_eu(
@@ -115,7 +116,13 @@ class EuropeanDataLoader:
         eur_fx = fx_multipliers['EUR='].reindex(sp_df.index).ffill()
         
         # Use 'Close Price' based on the column name in your SX5E snippet
+        # Use 'Close Price' based on the column name in your SX5E snippet
         benchmark_close_usd = sp_df['Close Price'].astype(float) * eur_fx 
+
+        # NEW: Drop duplicate dates, keeping the final recorded price for that day
+        benchmark_close_usd = benchmark_close_usd[~benchmark_close_usd.index.duplicated(keep='last')]
+
+        # Now it is safe to reindex
         benchmark_series = benchmark_close_usd.reindex(price_usd.index).copy()
         benchmark_series.name = self.benchmark
 

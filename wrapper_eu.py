@@ -53,11 +53,11 @@ signal_dict = {
     "regime": regime_signals
 }
 
-priors = [0.2, 0.2, 0.3, 0.3]
+priors = [0.2, 0.2, 0.45, 0.15]
 # Blend them via 60-Day Robust Regression
 final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
 print(f"  Signal coverage: {final_signals.notna().any(axis=1).sum()} / {len(final_signals)} days")
-
+blender.historical_weights.plot()
 # --- 3. Iterative Portfolio Construction ---
 print("\n========================================")
 print("     PHASE 3: CURRENCY-NEUTRAL PORTFOLIO")
@@ -154,18 +154,45 @@ last_date = data.price_ret.index[-1]
 print(f"Valid signals generated for date: {last_date.date()}")
 print("Preparing target notionals for t+1 execution...")
 
+# 1. Fetch the latest FX multipliers to reverse the USD conversion
+fx_multipliers = loader.processor.process_fx(config.EU_FX_FILE)
+# Safely get the FX rates for the last date (or the closest previous date)
+latest_fx = fx_multipliers.reindex(data.price_ret.index).ffill().loc[last_date]
+
 active_targets = current_positions[current_positions != 0].copy()
 
+# 2. Build the base execution DataFrame
 execution_df = pd.DataFrame({
     'internal_code': active_targets.index,
-    'currency': [data.currency_dict.get(ric, 'EUR') for ric in active_targets.index], # Add currency column
-    'target_notional_usd': active_targets.values.round(2)
+    'currency': [data.currency_dict.get(ric, 'EUR') for ric in active_targets.index], 
+    'target_notional_usd': active_targets.values
 })
 
+# 3. Convert back to local currency
+def get_local_notional(row):
+    raw_curr = row['currency']
+    fx_col = f"{raw_curr}="
+    
+    # Default to EUR rate if the specific currency rate is missing
+    rate = latest_fx.get(fx_col, latest_fx.get('EUR=', 1.0))
+    
+    local_val = row['target_notional_usd'] / rate
+    
+    return local_val
+execution_df['currency']= execution_df['currency'].apply(lambda x: x.upper())   
+
+execution_df['target_notional_local'] = execution_df.apply(get_local_notional, axis=1).round(2)
+
+# 4. Standardize the currency strings (e.g., GBp -> GBP, eur -> EUR)
+execution_df['currency'] = execution_df['currency'].apply(lambda x: 'GBP' if x == 'GBp' else x.upper())
+
+# Optional: Reorder columns to make it clean, and keep USD just for reference
+execution_df = execution_df[['internal_code', 'currency', 'target_notional_local', 'target_notional_usd']]
+execution_df=execution_df[['internal_code', 'currency', 'target_notional_local']]
+execution_df.rename(columns={'target_notional_local': 'target_notional'}, inplace=True)
 output_file = 'target_notionals_eu_t_plus_1.csv'
 execution_df.to_csv(output_file, index=False)
 print(f"Successfully saved {len(execution_df)} target positions to {output_file}")
-
 
 # --- 5. Exposure Plotting ---
 exposure_df = pd.DataFrame(exposure_log).set_index('Date')
@@ -231,3 +258,4 @@ axes[1].grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig('backtest_results_eu.png', dpi=150, bbox_inches='tight')
 print("\nPlot saved to backtest_results_eu.png")
+all_target_positions.tail(20)

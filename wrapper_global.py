@@ -4,51 +4,126 @@ import warnings
 import matplotlib.pyplot as plt
 import os
 
-from data_loader import PipelineDataLoader, EuropeanDataLoader
-from signals import ShortTermSignalGenerator, LongTermSignalGenerator, PCASignalGenerator, RobustRegressionBlender, RegimePCAHMMGenerator
-from portfolio import PortfolioConstructor, CurrencyNeutralPortfolioConstructor 
-from backtester import Backtester
-import config
+try:
+    get_ipython().run_line_magic('load_ext', 'autoreload')
+    get_ipython().run_line_magic('autoreload', '3')
+except NameError:
+    pass
 
+from data_loader import PipelineDataLoader, EuropeanDataLoader
+from signals import DefensiveSignalGenerator, ShortTermSignalGenerator, LongTermSignalGenerator, PCASignalGenerator, RobustRegressionBlender, RegimePCAHMMGenerator, VolumeConvictionGenerator
+from portfolio import PortfolioConstructor, CurrencyNeutralPortfolioConstructor 
+# Assuming you saved the dictionaries in config_signals.py
+import config_signals 
+import config_daily as config
+from backtester import Backtester
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 def run_regional_pipeline(region='US'):
-    """Encapsulates the data, alpha, and portfolio generation for a region."""
     print(f"\n========================================")
     print(f"       STARTING {region} PIPELINE")
     print(f"========================================")
     
+    # 1. LOAD DATA & TARGET CONFIG
     if region == 'US':
         loader = PipelineDataLoader(benchmark_ticker='SPX')
         benchmark = 'SPX'
+        cfg = config_signals.US
     else:
         loader = EuropeanDataLoader(benchmark_ticker='SX5E')
         benchmark = 'SX5E'
+        cfg = config_signals.EU
         
     data = loader.fetch_all()
     
-    print(f"[{region}] Generating Alphas...")
-    short_gen = ShortTermSignalGenerator(reversal_window=5)
-    long_gen = LongTermSignalGenerator() 
-    pca_gen = PCASignalGenerator(pca_update_freq=21)
-    regime_gen = RegimePCAHMMGenerator(pca_update_freq=63, n_components=10)
-    blender = RobustRegressionBlender(lookback=252, temperature=3)
+    print(f"[{region}] Generating Alphas with Optimal Parameters...")
+    
+    # 2. INSTANTIATE SIGNALS DYNAMICALLY FROM CONFIG
+    short_gen = ShortTermSignalGenerator(
+        reversal_window=cfg['short_term']['reversal_window'], 
+        smoothing_span=cfg['short_term']['smoothing_span']
+    )
+    long_gen = LongTermSignalGenerator(
+        momentum_window=cfg['long_term']['momentum_window'],
+        skip_recent=cfg['long_term']['skip_recent'],
+        smoothing_span=cfg['long_term']['smoothing_span'],
+        value_tilt_strength=cfg['long_term']['value_tilt_strength']
+    )
+    pca_gen = PCASignalGenerator(
+        n_components=cfg['pca']['n_components'],
+        cov_window=cfg['pca']['cov_window'],
+        mom_window=cfg['pca']['mom_window'],
+        rev_window=cfg['pca']['rev_window'],
+        span=cfg['pca']['span'],
+        pca_update_freq=21
+    )
+    defensive_gen = DefensiveSignalGenerator(
+        drift_window=cfg['defensive']['drift_window'],
+        vol_window=cfg['defensive']['vol_window'],
+        smoothing_span=cfg['defensive']['smoothing_span']
+    )
+    volume_gen = VolumeConvictionGenerator(
+        volume_window=cfg['volume']['volume_window'],
+        return_window=cfg['volume']['return_window'],
+        smoothing_span=cfg['volume']['smoothing_span']
+    )
+    
+    # 2. INSTANTIATE HMM DYNAMICALLY FROM CONFIG
+    regime_gen = RegimePCAHMMGenerator(
+        n_components=cfg['hmm']['n_components'],
+        pca_update_freq=cfg['hmm']['pca_update_freq'],
+        max_states=cfg['hmm']['max_states'],
+        hmm_window=cfg['hmm']['hmm_window']
+    )
+
+    # 3. EXTRACT ICs AND DETERMINE DIRECTION (Sign)
+    ic_short = cfg['short_term'].get('IC', cfg['short_term'].get('ic', 0.0))
+    ic_long = cfg['long_term'].get('IC', cfg['long_term'].get('ic', 0.0))
+    ic_pca = cfg['pca'].get('IC', cfg['pca'].get('ic', 0.0))
+    ic_def = cfg['defensive'].get('IC', cfg['defensive'].get('ic', 0.0))
+    ic_regime = cfg['hmm'].get('IC', cfg['hmm'].get('ic', 0.0)) # Handles uppercase or lowercase
+    def get_sign(ic):
+        return -1 if ic < 0 else 1
 
     signal_dict = {
-        "short": short_gen.generate(data.hedged_returns),
-        "long": long_gen.generate(data.hedged_returns, data.earnings_yield, data.sectors),
-        "pca": pca_gen.generate(data.hedged_returns),
-        "regime": regime_gen.generate(data.hedged_returns)
+        "short": short_gen.generate(data.hedged_returns) * get_sign(ic_short),
+        "long": long_gen.generate(data.hedged_returns, data.earnings_yield, data.sectors) * get_sign(ic_long),
+        "pca": pca_gen.generate(data.hedged_returns) * get_sign(ic_pca),
+        "regime": regime_gen.generate(data.hedged_returns) * get_sign(ic_regime),
+        "defensive": defensive_gen.generate(data.hedged_returns, data.betas) * get_sign(ic_def)
     }
 
-    priors = [0.25, 0.25, 0.25, 0.25]
+    # 4. DYNAMIC PRIOR WEIGHTING BASED ON ABSOLUTE IC
+    abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_regime), abs(ic_def)]
+    total_abs_ic = sum(abs_ics)
+    
+    if total_abs_ic == 0:
+        raise ValueError(f"[{region}] All signals have zero IC! Check configs.")
+        
+    priors = [ic / total_abs_ic for ic in abs_ics]
+
+    print(f"[{region}] Flipped? Short: {'Yes' if ic_short < 0 else 'No'}, Def: {'Yes' if ic_def < 0 else 'No'}, HMM: {'Yes' if ic_regime < 0 else 'No'}")
+    print(f"[{region}] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Regime:{priors[3]:.2f}, Def:{priors[4]:.2f}")
+
+    blender = RobustRegressionBlender(lookback=252, temperature=2)
     final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
     
+    # 5. DYNAMIC HORIZON TO TRADE_SPEED CONVERSION
+    avg_horizon = (
+        (cfg['short_term']['horizon'] * priors[0]) +
+        (cfg['long_term']['horizon'] * priors[1]) +
+        (cfg['pca']['horizon'] * priors[2]) +
+        (cfg['hmm']['horizon'] * priors[3]) + # Now dynamically pulls the 21-day horizon
+        (cfg['defensive']['horizon'] * priors[4])
+    )
+    
+    dynamic_trade_speed = max(0.05, min(1.0, 2.0 / (avg_horizon + 1)))
+    print(f"[{region}] Blended Horizon: {avg_horizon:.1f} days -> Dynamic Trade Speed: {dynamic_trade_speed:.3f}")
+
     print(f"[{region}] Constructing Portfolio...")
     adv_60d = data.volume_usd.rolling(window=60, min_periods=10).mean()
     
-    # Currency dict is None for US, populated for EU
     curr_dict = getattr(data, 'currency_dict', None)
     if region == 'EU':
         portfolio_constructor = CurrencyNeutralPortfolioConstructor(
@@ -57,7 +132,8 @@ def run_regional_pipeline(region='US'):
             signal_threshold=0.75,     
             hard_volume_limit=2000000, 
             max_gross_exposure=10000000,
-            currency_dict=curr_dict  
+            currency_dict=curr_dict,
+            trade_speed=dynamic_trade_speed # <-- PASSED HERE
         )
     else:
         portfolio_constructor = PortfolioConstructor(
@@ -65,7 +141,8 @@ def run_regional_pipeline(region='US'):
             max_adv_pct=config.PARAMS['MAX_ADV_PCT'],
             signal_threshold=0.75,     
             hard_volume_limit=2000000, 
-            max_gross_exposure=10000000
+            max_gross_exposure=10000000,
+            trade_speed=dynamic_trade_speed # <-- PASSED HERE
         )
 
     all_target_positions = pd.DataFrame(0.0, index=data.price_ret.index, columns=data.price_ret.columns)
@@ -91,7 +168,8 @@ def run_regional_pipeline(region='US'):
             
             current_positions = portfolio_constructor.generate_target_positions(
                 t=t, signals=sig_t, cov_matrix=cov_matrix, 
-                adv_60d=adv_60d.loc[t], betas=data.betas.loc[t], benchmark_ticker=benchmark
+                adv_60d=adv_60d.loc[t], betas=data.betas.loc[t], benchmark_ticker=benchmark,
+                current_positions=current_positions 
             )
         else:
             daily_total_ret = data.price_ret.loc[t].fillna(0) + data.div_ret.loc[t].fillna(0)
@@ -99,15 +177,14 @@ def run_regional_pipeline(region='US'):
 
         all_target_positions.loc[t] = current_positions
 
-    return data, all_target_positions, loader
+    return data, all_target_positions, loader, blender.historical_weights
 
 
 # =================================================================================
 # 1. RUN INDIVIDUAL PIPELINES
 # =================================================================================
-us_data, us_positions, us_loader = run_regional_pipeline('US')
-eu_data, eu_positions, eu_loader = run_regional_pipeline('EU')
-
+us_data, us_positions, us_loader, us_weights = run_regional_pipeline('US')
+eu_data, eu_positions, eu_loader, eu_weights = run_regional_pipeline('EU')
 # =================================================================================
 # 2. GLOBAL COMBINATION & DYNAMIC SOFTMAX WEIGHTING
 # =================================================================================
@@ -133,7 +210,7 @@ us_roll_sharpe = (us_pnl.rolling(roll_window).mean() / (us_pnl.rolling(roll_wind
 eu_roll_sharpe = (eu_pnl.rolling(roll_window).mean() / (eu_pnl.rolling(roll_window).std() + 1e-8)).fillna(0)
 
 # C. Softmax Regression for smooth capital allocation
-temperature = 0.05 
+temperature = 0.1
 exp_us = np.exp(us_roll_sharpe / temperature)
 exp_eu = np.exp(eu_roll_sharpe / temperature)
 
@@ -142,13 +219,12 @@ dynamic_weight_eu = exp_eu / (exp_us + exp_eu)
 
 # --- NEW: BAYESIAN PRIOR BLENDING ---
 # 1. Define your structural base weights
-prior_us = 0.7
-prior_eu = 0.3
+prior_us = 0.3
+prior_eu = 0.7
 
 # 2. Define how strongly you trust the prior vs. the dynamic momentum (0.0 to 1.0)
 #    0.0 = Fully dynamic (ignores prior), 1.0 = Fully static (pegs to prior)
-prior_confidence = 0.5
-
+prior_confidence = 0.4
 raw_weight_us = (prior_us * prior_confidence) + (dynamic_weight_us * (1 - prior_confidence))
 raw_weight_eu = (prior_eu * prior_confidence) + (dynamic_weight_eu * (1 - prior_confidence))
 
@@ -207,7 +283,7 @@ print(f"Saved {len(us_exec)} US target positions.")
 eu_active = eu_global_final.iloc[-1]
 eu_active = eu_active[eu_active != 0].copy()
 
-fx_multipliers = eu_loader.processor.process_fx(config.EU_FX_FILE)
+fx_multipliers = eu_loader.processor.process_fx(config.EU_FX_FILES)
 latest_fx = fx_multipliers.reindex(eu_data.price_ret.index).ffill().loc[last_date]
 
 eu_exec = pd.DataFrame({
@@ -296,6 +372,9 @@ print(f"  Correlation vs SPX:   {corr_spx:.3f}")
 print(f"  Correlation vs SX5E:  {corr_sx5e:.3f}")
 print(f"  Avg Gross Exposure:   ${avg_gross:,.2f}")
 print(f"  Avg Net Exposure:     ${avg_net:,.2f}")
+print(f"  Final US Weight:      {weight_us.iloc[-1]:.1%}")
+print(f"  Final EU Weight:      {weight_eu.iloc[-1]:.1%}")
+print(f"  Hit Rate:            { ((net_pnl > 0).sum() / (net_pnl != 0).sum() * 100):.2f}%") 
 
 print(f"\n[ FRICTION & EXECUTION ]")
 print(f"  Annualized Turnover:  ${annual_turnover:,.2f} ({turnover_pct:.1f}% of Gross)")
@@ -303,9 +382,9 @@ print(f"  Total T-Costs:        ${total_tcosts:,.2f}")
 print(f"  Total Financing:      ${total_financing:,.2f}")
 print(f"  Total Friction Drag:  ${(total_tcosts + total_financing):,.2f}")
 
-
 # --- PLOTTING ---
-fig, axes = plt.subplots(4, 1, figsize=(14, 16), sharex=True)
+# ---> CHANGED: Increased to 6 subplots and taller figsize
+fig, axes = plt.subplots(6, 1, figsize=(14, 24), sharex=True)
 
 # 1. Cumulative PnL & Drawdown
 cum_pnl.plot(ax=axes[0], color='forestgreen', lw=2, label='Cumulative PnL')
@@ -325,10 +404,32 @@ axes[1].set_ylim(0, 1)
 # 3. Scale Factor
 vol_scale_factor.plot(ax=axes[2], color='purple', lw=2)
 axes[2].set_title('Global Volatility Diversification Multiplier')
+axes[2].grid(True, alpha=0.3)
 
-# Plot rolling sharpe:
-rolling_sharpe = np.sqrt(252) * net_pnl.rolling(window=252).mean() / net_pnl.rolling(window=63).std()
+# 4. Rolling Sharpe
+rolling_sharpe = np.sqrt(252) * net_pnl.rolling(window=252).mean() / net_pnl.rolling(window=252).std()
 rolling_sharpe.plot(ax=axes[3], color='orange', lw=2)
-axes[3].set_title('Rolling 63-Day Sharpe Ratio')
+axes[3].set_title('Rolling 252-Day Sharpe Ratio')
 axes[3].axhline(0, color='black', ls='--', alpha=0.4)
 axes[3].axhline(1, color='green', ls='--', alpha=0.4)
+axes[3].grid(True, alpha=0.3)
+
+# ---> NEW: 5. US Signal Weights
+# Align the weights to the common_dates to keep the x-axis consistent
+us_weights_aligned = us_weights.loc[common_dates].ffill()
+us_weights_aligned.plot(ax=axes[4], kind='area', stacked=True, colormap='tab10', alpha=0.7)
+axes[4].set_title('US Internal Signal Allocation (Softmax Weights)')
+axes[4].set_ylabel('Signal Weight')
+axes[4].set_ylim(0, 1)
+axes[4].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+# ---> NEW: 6. EU Signal Weights
+eu_weights_aligned = eu_weights.loc[common_dates].ffill()
+eu_weights_aligned.plot(ax=axes[5], kind='area', stacked=True, colormap='tab10', alpha=0.7)
+axes[5].set_title('EU Internal Signal Allocation (Softmax Weights)')
+axes[5].set_ylabel('Signal Weight')
+axes[5].set_ylim(0, 1)
+axes[5].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+plt.tight_layout()
+plt.show()

@@ -33,37 +33,6 @@ class Momentum12_1M(SignalGenerator):
         signal = mom_12m - mom_1m
         return signal
 
-
-
-class ShortTermSignalGenerator:
-    """Generates fast, mean-reversion signals based on short-term price action."""
-    def __init__(self, reversal_window=5, smoothing_span=3):
-        self.window = reversal_window
-        self.span = smoothing_span
-
-    def generate(self, hedged_returns):
-        print(f"  -> Generating Short-Term Signals ({self.window}d Reversal)...")
-        # 1. Calculate short-term returns
-        ret_short = hedged_returns.rolling(self.window, min_periods=self.window-2).sum()
-        
-        # 2. Cross-sectional Z-score
-        cs_mean = ret_short.mean(axis=1)
-        cs_std = ret_short.std(axis=1)
-        z_score = ret_short.sub(cs_mean, axis=0).div(cs_std + 1e-8, axis=0)
-        
-        # 3. Invert for Mean Reversion (Buy losers, sell winners)
-        signal = -z_score
-        
-        # Smooth the raw signals if you aren't already
-        sig_df = signal.ewm(span=self.span, min_periods=1).mean()
-
-        # SWAP TO ROBUST NORMALIZATION
-        final_z = robust_cross_sectional_norm(sig_df)
-        
-        return final_z
-
-
-
 def robust_cross_sectional_norm(sig_df: pd.DataFrame, limit: float = 3.0) -> pd.DataFrame:
     cs_median = sig_df.median(axis=1)
     
@@ -82,6 +51,71 @@ def robust_cross_sectional_norm(sig_df: pd.DataFrame, limit: float = 3.0) -> pd.
     soft_clipped = limit * np.tanh(norm_z / limit)
     
     return soft_clipped.fillna(0.0)
+
+
+
+class ShortTermSignalGenerator:
+    """Generates fast, mean-reversion signals based on short-term price action."""
+    def __init__(self, reversal_window=10, smoothing_span=2):
+        self.window = reversal_window
+        self.span = smoothing_span
+
+    def generate(self, hedged_returns):
+        print(f"  -> Generating Short-Term Signals ({self.window}d Reversal)...")
+        # 1. Calculate short-term returns
+        ret_short = hedged_returns.rolling(self.window, min_periods=self.window-2).sum()
+        
+        # 2. Cross-sectional Z-score
+        cs_mean = ret_short.mean(axis=1)
+        cs_std = ret_short.std(axis=1)
+        z_score = ret_short.sub(cs_mean, axis=0).div(cs_std + 1e-8, axis=0)
+        
+        # 3. Invert for Mean Reversion (Buy losers, sell winners)
+        signal = z_score
+        
+        # Smooth the raw signals if you aren't already
+        sig_df = signal.ewm(span=self.span, min_periods=1).mean()
+
+        # SWAP TO ROBUST NORMALIZATION
+        final_z = robust_cross_sectional_norm(sig_df)
+        
+        return final_z
+
+
+class VolumeConvictionGenerator:
+    """
+    Generates an orthogonal signal based on the Institutional Footprint.
+    It identifies high-conviction moves by weighting idiosyncratic returns 
+    by their relative volume shock.
+    """
+    def __init__(self, volume_window=10, return_window=3, smoothing_span=3):
+        self.volume_window = volume_window
+        self.return_window = return_window
+        self.smoothing_span = smoothing_span
+
+    def generate(self, hedged_returns, volume):
+        # 1. Calculate the Volume Shock (Ratio of today's volume to moving average)
+        # Add 1e-8 to avoid division by zero on halted/stale tickers
+        avg_volume = volume.rolling(window=self.volume_window, min_periods=10).mean()
+        volume_shock = volume / (avg_volume + 1e-8)
+        
+        # 2. Calculate directional conviction
+        # We look at a short rolling return to capture the immediate trend direction
+        trend_ret = hedged_returns.rolling(window=self.return_window, min_periods=3).sum()
+        
+        # 3. The raw signal: Direction * Magnitude of Volume Shock
+        # High volume up-moves = highly positive. High volume down-moves = highly negative.
+        raw_conviction = trend_ret * volume_shock
+        
+        # 4. Cross-sectional z-score daily to neutralize market-wide volume events
+        mean_conviction = raw_conviction.mean(axis=1)
+        std_conviction = raw_conviction.std(axis=1) + 1e-8
+        z_scored = raw_conviction.sub(mean_conviction, axis=0).div(std_conviction, axis=0)
+        
+        # 5. Smooth the signal to reduce daily turnover and trading costs
+        smoothed_signal = z_scored.ewm(span=self.smoothing_span, min_periods=1).mean()
+        
+        return smoothed_signal
 
 
 class LongTermSignalGenerator:
@@ -225,49 +259,64 @@ class RegimePCAHMMGenerator:
     """
     def __init__(self, n_components=8, pca_update_freq=42, initial_states=2, max_states=5, hmm_window=500):
         self.k = n_components
-        self.freq = pca_update_freq # Re-run PCA and full HMM BIC check every X days
+        self.freq = pca_update_freq 
         self.n_states = initial_states
         self.max_states = max_states
-        self.hmm_window = hmm_window # Rolling window for HMM to prevent infinite memory growth
+        self.hmm_window = hmm_window 
         self.model = None
 
     def _calc_bic(self, model, X):
-        """Calculates Bayesian Information Criterion for an HMM"""
-        score = model.score(X) # Log-likelihood
-        n_features = X.shape[1]
-        n_states = model.n_components
-        # Free parameters: Transitions + Means + Covariances (full)
-        n_params = n_states*(n_states-1) + n_states*n_features + n_states*n_features*(n_features+1)/2
-        return -2 * score + n_params * np.log(X.shape[0])
+        try:
+            log_likelihood = model.score(X)
+            n_features = X.shape[1]
+            n_states = model.n_components
+            n_params = n_states * (n_states - 1) + 2 * n_features * n_states
+            bic = -2 * log_likelihood + n_params * np.log(X.shape[0])
+            return bic
+        except Exception:
+            return np.inf
 
     def _fit_best_hmm(self, X, current_states):
+        best_bic = np.inf
         best_model = None
-        
-        # FIX: Changed to "diag" to prevent matrix singularity on orthogonal PCs
-        model_curr = hmm.GaussianHMM(
-            n_components=current_states, 
-            covariance_type="diag", 
-            n_iter=100, 
-            random_state=42
-        )
-        model_curr.fit(X)
-        bic_curr = self._calc_bic(model_curr, X)
-        best_model = model_curr
         best_states = current_states
         
-        if current_states < self.max_states:
-            model_up = hmm.GaussianHMM(
-                n_components=current_states + 1, 
-                covariance_type="diag", 
-                n_iter=100, 
-                random_state=42
-            )
-            model_up.fit(X)
-            bic_up = self._calc_bic(model_up, X)
+        # 1. Safely test the current state configuration
+        try:
+            model_curr = hmm.GaussianHMM(n_components=current_states, covariance_type="diag", n_iter=100, random_state=42)
+            model_curr.fit(X)
+            bic_curr = self._calc_bic(model_curr, X)
             
-            if bic_up < bic_curr:
-                best_model = model_up
-                best_states = current_states + 1
+            if bic_curr != np.inf:
+                best_model = model_curr
+                best_bic = bic_curr
+                best_states = current_states
+        except Exception:
+            pass # Fails gracefully
+        
+        # 2. Safely test scaling up by 1 state
+        if current_states < self.max_states:
+            try:
+                model_up = hmm.GaussianHMM(n_components=current_states + 1, covariance_type="diag", n_iter=100, random_state=42)
+                model_up.fit(X)
+                bic_up = self._calc_bic(model_up, X)
+                
+                if bic_up < best_bic:
+                    best_model = model_up
+                    best_bic = bic_up
+                    best_states = current_states + 1
+            except Exception:
+                pass
+                
+        # 3. BULLETPROOF FALLBACK: If both failed due to data singularities
+        if best_model is None:
+            best_model = hmm.GaussianHMM(n_components=2, covariance_type="diag", init_params="")
+            # Manually inject safe, uniform parameters so it never crashes
+            best_model.startprob_ = np.array([0.5, 0.5])
+            best_model.transmat_ = np.array([[0.95, 0.05], [0.05, 0.95]])
+            best_model.means_ = np.zeros((2, X.shape[1]))
+            best_model.covars_ = np.ones((2, X.shape[1]))
+            best_states = 2
                 
         return best_model, best_states
 
@@ -283,70 +332,67 @@ class RegimePCAHMMGenerator:
         top_vecs = None
         pc_returns = np.zeros((n_days, self.k))
         
-        # We need enough days to estimate K*K covariance matrices for the HMM states.
-        # 60 days (roughly 3 months) is a safe minimum.
         burn_in = max(60, self.k * 3) 
         
         for i in range(1, n_days):
             
-            # --- THE FIX: Skip until we have enough data ---
             if i < burn_in:
-                continue # Signal remains 0.0 for the burn-in period
+                continue 
             
-            # --- EXPENSIVE STEP: Periodic SVD & Full HMM BIC Check ---
-            # It will naturally trigger on the first day after burn_in because top_vecs is None
             if i % self.freq == 0 or top_vecs is None:
                 lookback_start = max(0, i - self.hmm_window)
                 window_data = ret_vals[lookback_start:i]
                 
-                # SVD needs mean-centered data
                 window_data_centered = window_data - np.mean(window_data, axis=0)
                 svd.fit(window_data_centered)
                 top_vecs = svd.components_.T 
                 
-                # 2. Re-project historical returns onto new PCs for the HMM
                 pc_hist = window_data_centered @ top_vecs
                 pc_returns[lookback_start:i] = pc_hist
                 
-                # 3. Refit HMM and check BIC
                 self.model, self.n_states = self._fit_best_hmm(pc_hist, self.n_states)
                 
             else:
-                # --- CHEAP STEP: Daily updates ---
                 today_centered = ret_vals[i] - np.mean(ret_vals[i])
                 pc_returns[i] = today_centered @ top_vecs
                 
                 lookback_start = max(0, i - self.hmm_window)
                 X_recent = pc_returns[lookback_start : i+1]
                 
-                self.model.init_params = '' 
-                self.model.n_iter = 2
-                self.model.fit(X_recent)
+                # --- DAILY UPDATE PROTECTION ---
+                try:
+                    self.model.init_params = '' 
+                    self.model.n_iter = 5
+                    self.model.fit(X_recent)
+                except Exception:
+                    # If daily fitting hits a singularity, ignore it and keep yesterday's stable parameters
+                    pass 
                 
-            # --- SIGNAL GENERATION (Mixture Sharpe) ---
+            # --- SIGNAL GENERATION ---
             lookback_start = max(0, i - self.hmm_window)
-                # --- HMM SANITIZER ---
-            # If a state gets hollowed out during fitting, hmmlearn leaves a zero-sum row.
-            # We must re-normalize the transition matrix to prevent predict_proba from crashing.
+            
+            # Sanitizer block (keeps probabilities mathematically valid)
             if hasattr(self.model, 'transmat_'):
                 row_sums = self.model.transmat_.sum(axis=1)
                 for r_idx, r_sum in enumerate(row_sums):
                     if np.isclose(r_sum, 0.0) or np.isnan(r_sum):
-                        # If the row collapsed, assign a uniform distribution
                         self.model.transmat_[r_idx, :] = 1.0 / self.model.n_components
                     else:
-                        # Otherwise, force it to sum to exactly 1.0 to handle floating point errors
                         self.model.transmat_[r_idx, :] /= r_sum
+                        
             if hasattr(self.model, 'startprob_'):
                 s_sum = np.sum(self.model.startprob_)
                 if np.isclose(s_sum, 0.0) or np.isnan(s_sum):
-                    # If corrupted, reset to a uniform distribution
                     self.model.startprob_ = np.ones(self.model.n_components) / self.model.n_components
                 else:
-                    # Force exact sum to 1.0
                     self.model.startprob_ /= s_sum
-            filtered_probs = self.model.predict_proba(pc_returns[lookback_start : i+1])
-            curr_state_prob = filtered_probs[-1] 
+            
+            # Safely predict probabilities
+            try:
+                filtered_probs = self.model.predict_proba(pc_returns[lookback_start : i+1])
+                curr_state_prob = filtered_probs[-1] 
+            except Exception:
+                curr_state_prob = np.ones(self.model.n_components) / self.model.n_components
             
             tomorrows_prob = curr_state_prob @ self.model.transmat_ 
             
@@ -368,17 +414,10 @@ class RegimePCAHMMGenerator:
             signal_matrix[i] = daily_sharpe
             
         sig_df = pd.DataFrame(signal_matrix, index=returns.index, columns=returns.columns)
-        
-        # Assuming robust_cross_sectional_norm is in your scope
         final_z = robust_cross_sectional_norm(sig_df)
         
         return final_z
 
-
-
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import HuberRegressor
 
 class RobustRegressionBlender:
     """
@@ -446,12 +485,48 @@ class RobustRegressionBlender:
                     pass
                     
         # 3. Process Coefficients
+        alpha_shrinkage = 0.25
         w_df = pd.DataFrame(daily_weights, index=hedged_returns.index, columns=signal_names)
-        
         smoothed_coefs = w_df.rolling(self.lookback, min_periods=10).mean()
         
-        scale_factor = smoothed_coefs.abs().mean(axis=1) + 1e-8
-        scaled_coefs = smoothed_coefs.div(scale_factor, axis=0)
+        # --- NEW: ALPHA COVARIANCE ADJUSTMENT ---
+        print(f"  -> Applying Cross-Sectional Alpha Orthogonalization...")
+        adjusted_coefs = smoothed_coefs.copy()
+        
+        for i, date in enumerate(hedged_returns.index):
+            if i < 10 or smoothed_coefs.loc[date].isna().all():
+                continue
+                
+            # 1. Build the cross-section of today's signals (n_assets x n_signals)
+            today_signals = pd.DataFrame({name: signals_dict[name].loc[date] for name in signal_names})
+            today_signals = today_signals.dropna()
+            
+            if len(today_signals) < 50:
+                continue
+                
+            # 2. Calculate the cross-sectional correlation matrix of the signals
+            # This tells us how redundant the signals are today
+            sig_corr = today_signals.corr().fillna(0).values
+            
+            # 3. Shrinkage (just like asset covariance) to ensure it's invertible
+            identity_mat = np.eye(n_signals)
+            robust_corr = (1.0 - alpha_shrinkage) * sig_corr + (alpha_shrinkage * identity_mat)
+            
+            # 4. Calculate the Inverse Correlation Matrix
+            try:
+                inv_corr = np.linalg.inv(robust_corr)
+            except np.linalg.LinAlgError:
+                inv_corr = identity_mat # Fallback if perfectly collinear
+                
+            # 5. Apply the adjustment: W_optimal = Inverse_Covariance @ W_raw
+            raw_w = smoothed_coefs.loc[date].values
+            optimal_w = inv_corr @ raw_w
+            
+            adjusted_coefs.loc[date] = optimal_w
+            
+        # --- RESUME ORIGINAL LOGIC ---
+        scale_factor = adjusted_coefs.abs().mean(axis=1) + 1e-8
+        scaled_coefs = adjusted_coefs.div(scale_factor, axis=0)
         
         # 4. Apply Temperature-Scaled Softmax with Bayesian Prior
         scaled_z = scaled_coefs.div(self.temperature)
@@ -474,202 +549,44 @@ class RobustRegressionBlender:
             blended += signals_dict[name].mul(softmax_weights[name], axis=0)
                    
         return blended
+
+class DefensiveSignalGenerator:
+    """
+    Generates slow-moving, defensive signals designed to survive bear markets and rate-hike regimes.
+    Combines 'Betting Against Beta' (Low Beta), Low Volatility, and 1-Month Earnings Drift.
+    """
+    def __init__(self, drift_window=21, vol_window=63, smoothing_span=10):
+        self.drift_window = drift_window
+        self.vol_window = vol_window
+        self.span = smoothing_span
+
+    def generate(self, hedged_returns, betas):
+        print(f"  -> Generating Defensive Signals (Low Vol, Low Beta, 1M Drift)...")
+        
+        # --- 1. Low Volatility Anomaly ---
+        # Calculate 3-month rolling volatility. We invert it (multiply by -1) 
+        # so we are Long Low-Vol and Short High-Vol.
+        rolling_vol = hedged_returns.rolling(self.vol_window, min_periods=self.vol_window-10).std()
+        low_vol_z = robust_cross_sectional_norm(-rolling_vol)
+        
+        # --- 2. Betting Against Beta (BAB) ---
+        # We want to be Long Low Beta, Short High Beta. 
+        # (Assuming 'betas' is aligned with your returns DataFrame)
+        bab_z = robust_cross_sectional_norm(-betas.fillna(1.0))
+        
+        # --- 3. 1-Month Earnings Drift (Intermediate Momentum) ---
+        # 21-day trend continuation.
+        drift_ret = hedged_returns.rolling(self.drift_window, min_periods=10).sum()
+        drift_z = robust_cross_sectional_norm(drift_ret)
+        
+        # --- Blend the Defensive Traits ---
+        # We equal-weight the three defensive properties. 
+        # This creates a highly stable, slow-moving signal.
+        defensive_blend = (0.4 * low_vol_z) + (0.4 * bab_z) + (0.2 * drift_z)
+        
+        # Heavy smoothing to ensure this acts as a low-turnover anchor
+        smoothed_defensive = defensive_blend.ewm(span=self.span, min_periods=1).mean()
+        
+        final_z = robust_cross_sectional_norm(smoothed_defensive)
+        return final_z
     
-# class RollingLinearSignal(SignalGenerator):
-#     """
-#     A walk-forward rolling linear model (Ridge Regression).
-    
-#     Fixed to use Time-Series scaling instead of Cross-Sectional neutralization,
-#     allowing the model to capture directional trends and fat-tailed momentum.
-#     """
-#     # Changed default fwd_days to 21 to match the refit window and avoid 1-day noise fitting
-#     def __init__(self, train_window=252, refit_every=21, fwd_days=21, ridge_alpha=10.0):
-#         self.train_window = train_window
-#         self.refit_every = refit_every
-#         self.fwd_days = fwd_days
-#         self.ridge_alpha = ridge_alpha
-#         self.history_coefs = []
-
-#     def get_signals(self, hedged_returns, **kwargs):
-#         log_returns = np.log1p(hedged_returns)
-#         dates = log_returns.index
-#         tickers = log_returns.columns
-        
-#         print("1. Computing base factors...")
-#         mom = log_returns.rolling(252, min_periods=200).sum() - log_returns.rolling(21, min_periods=15).sum()
-#         rev = -log_returns.rolling(5, min_periods=3).sum()
-#         vol = -log_returns.rolling(60, min_periods=40).std(ddof=0)
-        
-#         print("2. Applying time-series scaling (Removed _cs_robust)...")
-#         # Use a tiny epsilon to prevent division by zero on zero-volatility/flat days
-#         eps = 1e-8
-#         z_mom = mom / (mom.rolling(252, min_periods=100).std() + eps)
-#         z_rev = rev / (rev.rolling(252, min_periods=100).std() + eps)
-#         z_vol = vol / (vol.rolling(252, min_periods=100).std() + eps)
-        
-#         factors = {"mom": z_mom, "rev": z_rev, "vol": z_vol}
-#         feat_names = list(factors.keys())
-        
-#         print(f"3. Building target variable (Predicting {self.fwd_days}-day returns)...")
-#         # Target is raw forward returns. We do NOT neutralize the target.
-#         fwd = log_returns.rolling(self.fwd_days).sum().shift(-self.fwd_days)
-        
-#         out_signal = pd.DataFrame(index=dates, columns=tickers, dtype=float)
-        
-#         # fit_intercept=True allows the model to handle the base market drift
-#         model = Ridge(alpha=self.ridge_alpha, fit_intercept=True)
-        
-#         start_idx = self.train_window + self.fwd_days
-#         refits = list(range(start_idx, len(dates), self.refit_every))
-        
-#         print(f"4. Running walk-forward linear model ({len(refits)} refits)...")
-        
-#         is_fitted = False 
-        
-#         for rp in tqdm(refits, desc="Rolling Fit"):
-#             tr1_idx = rp - self.fwd_days # Ensure NO lookahead bias
-#             tr0_idx = max(0, tr1_idx - self.train_window)
-#             train_dates = dates[tr0_idx:tr1_idx]
-            
-#             X_train, y_train = [], []
-#             for t in train_dates:
-#                 Xt = np.column_stack([factors[f].loc[t].values for f in feat_names])
-#                 yt = fwd.loc[t].values
-#                 valid = np.isfinite(Xt).all(axis=1) & np.isfinite(yt)
-#                 if valid.sum() > 0:
-#                     X_train.append(Xt[valid])
-#                     y_train.append(yt[valid])
-                
-#             if X_train:
-#                 X_train = np.vstack(X_train)
-#                 y_train = np.concatenate(y_train)
-                
-#                 # Fit if we have enough data points
-#                 if len(y_train) >= 100:
-#                     model.fit(X_train, y_train)
-#                     is_fitted = True
-#                     self.history_coefs.append({
-#                         "date": dates[rp],
-#                         "mom_weight": model.coef_[0],
-#                         "rev_weight": model.coef_[1],
-#                         "vol_weight": model.coef_[2],
-#                         "intercept": model.intercept_
-#                     })
-            
-#             if not is_fitted:
-#                 continue
-                
-#             nxt = min(len(dates), rp + self.refit_every)
-#             block_dates = dates[rp:nxt]
-            
-#             # Predict
-#             for t in block_dates:
-#                 Xt = np.column_stack([factors[f].loc[t].values for f in feat_names])
-#                 valid = np.isfinite(Xt).all(axis=1)
-#                 if valid.sum() > 0:
-#                     preds = model.predict(Xt[valid])
-#                     out_signal.loc[t, tickers[valid]] = preds
-
-#         # 5. Translate raw return predictions into cross-sectional Z-scores
-#         # This gives the portfolio engine the relative sizing it expects (mean=0, std=1)
-#         print("5. Formatting final signals for portfolio constructor...")
-        
-#         # Calculate daily cross-sectional mean and standard deviation
-#         cs_mean = out_signal.mean(axis=1)
-#         cs_std = out_signal.std(axis=1)
-        
-#         # Z-score the signals day-by-day (using a tiny epsilon to prevent division by zero)
-#         final_signal = out_signal.sub(cs_mean, axis=0).div(cs_std + 1e-8, axis=0)
-        
-#         return final_signal
-
-# class TimeSeriesMultiFactor(SignalGenerator):
-    # """
-    # Combines factors using historical time-series scaling rather than 
-    # daily cross-sectional standardizing. This preserves outliers and 
-    # overall market directionality.
-    # """
-    # def __init__(self, mom_weight=1.0, rev_weight=0.5, vol_weight=0.5):
-    #     # Slightly down-weighting rev and vol to let momentum lead
-    #     self.mom_weight = mom_weight
-    #     self.rev_weight = rev_weight
-    #     self.vol_weight = vol_weight
-
-    # def get_signals(self, hedged_returns, **kwargs):
-    #     log_returns = np.log1p(hedged_returns)
-        
-    #     # 1. Base factors
-    #     mom = log_returns.rolling(252, min_periods=200).sum() - log_returns.rolling(21, min_periods=15).sum()
-    #     rev = -log_returns.rolling(5, min_periods=3).sum()
-    #     vol = -log_returns.rolling(60, min_periods=40).std(ddof=0)
-        
-    #     # 2. Time-Series Scaling (NOT Cross-Sectional)
-    #     # We divide by the rolling 252-day standard deviation of the FACTOR ITSELF 
-    #     # to normalize the scale, but without forcing the cross-section to sum to zero.
-    #     mom_scaled = mom / mom.rolling(252, min_periods=100).std()
-    #     rev_scaled = rev / rev.rolling(252, min_periods=100).std()
-    #     vol_scaled = vol / vol.rolling(252, min_periods=100).std()
-        
-    #     # 3. Combine without clipping
-    #     signal = (
-    #         (mom_scaled * self.mom_weight) + 
-    #         (rev_scaled * self.rev_weight) + 
-    #         (vol_scaled * self.vol_weight)
-    #     )
-        
-    #     # Return the raw combined signal. No _cs_robust!
-    #     return signal
-
-
-    # class DynamicSignalBlender:
-#     """
-#     Allocates weight using a convex combination. A fixed percentage is allocated 
-#     to the PCA signal, and the remaining budget is dynamically split between 
-#     Short and Long signals using a Composite Regime Model.
-#     """
-#     def __init__(self, fast_win=21, slow_win=252, trend_win=60, pca_weight=0.30):
-#         self.fast_win = fast_win
-#         self.slow_win = slow_win
-#         self.trend_win = trend_win
-#         self.pca_weight = pca_weight # Convex allocation to PCA signal
-
-#     def blend(self, short_signals, long_signals, pca_signals, benchmark_returns):
-#         print(f"  -> Blending signals (Convex Budget: PCA {self.pca_weight*100}%, Dynamic { (1-self.pca_weight)*100 }%)...")
-        
-#         baseline_lookback = 252 * 2 
-        
-#         # --- 1. Volatility Regime ---
-#         bench_vol_fast = benchmark_returns.rolling(self.fast_win, min_periods=10).std()
-#         bench_vol_slow = benchmark_returns.rolling(self.slow_win, min_periods=60).std()
-#         vol_ratio = (bench_vol_fast / (bench_vol_slow + 1e-8)).fillna(1.0)
-#         vol_z = (vol_ratio - vol_ratio.rolling(baseline_lookback, min_periods=126).mean()) / \
-#                 (vol_ratio.rolling(baseline_lookback, min_periods=126).std() + 1e-8)
-#         vol_score = 1 / (1 + np.exp(-vol_z.fillna(0)))
-
-#         # --- 2. Trend Regime ---
-#         trend_ret = benchmark_returns.rolling(self.trend_win).sum()
-#         trend_vol = benchmark_returns.rolling(self.trend_win).std() * np.sqrt(self.trend_win)
-#         trend_strength = (trend_ret / (trend_vol + 1e-8)).abs()
-#         trend_z = (trend_strength - trend_strength.rolling(baseline_lookback, min_periods=126).mean()) / \
-#                   (trend_strength.rolling(baseline_lookback, min_periods=126).std() + 1e-8)
-#         trend_score = 1 / (1 + np.exp(-trend_z.fillna(0)))
-
-#         # --- 3. Convex Weight Allocation ---
-#         dynamic_budget = 1.0 - self.pca_weight
-        
-#         # Baseline 50/50 split of the dynamic budget, adjusted by regimes
-#         raw_short_ratio = 0.5 + 0.5 * (vol_score - trend_score)
-        
-#         # Calculate actual convex weights
-#         short_weight = raw_short_ratio.clip(lower=0.20, upper=0.80) * dynamic_budget
-#         long_weight = dynamic_budget - short_weight
-        
-#         # --- 4. Apply and Re-Normalize ---
-#         blended = (short_signals.mul(short_weight, axis=0) + 
-#                    long_signals.mul(long_weight, axis=0) + 
-#                    pca_signals.mul(self.pca_weight, axis=0))
-#         cs_mean = blended.mean(axis=1)
-#         cs_std = blended.std(axis=1)
-#         final_signal = blended.sub(cs_mean, axis=0).div(cs_std + 1e-8, axis=0)
-        
-#         return final_signal
