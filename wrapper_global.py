@@ -139,7 +139,7 @@ def run_regional_pipeline(region='US'):
         portfolio_constructor = PortfolioConstructor(
             target_ann_vol=config.PARAMS['TARGET_ANN_VOL'],
             max_adv_pct=config.PARAMS['MAX_ADV_PCT'],
-            signal_threshold=0.75,     
+            signal_threshold=0.55,     
             hard_volume_limit=2000000, 
             max_gross_exposure=10000000,
             trade_speed=dynamic_trade_speed # <-- PASSED HERE
@@ -257,7 +257,7 @@ eu_global_final = eu_pos_weighted.multiply(vol_scale_factor, axis=0)
 
 # Combine into one massive global position matrix
 global_positions = pd.concat([us_global_final, eu_global_final], axis=1)
-
+global_positions=global_positions.iloc[:-1]
 # =================================================================================
 # 4. LIVE EXECUTION EXPORT (US AND EU)
 # =================================================================================
@@ -270,7 +270,7 @@ print(f"Current Global Allocation -> US: {weight_us.iloc[-1]:.1%}, EU: {weight_e
 
 # --- US EXPORT ---
 us_active = us_global_final.iloc[-1]
-us_active = us_active[us_active != 0].copy()
+# us_active = us_active[us_active != 0].copy()
 us_exec = pd.DataFrame({
     'internal_code': us_active.index,
     'currency': 'USD',
@@ -281,7 +281,7 @@ print(f"Saved {len(us_exec)} US target positions.")
 
 # --- EU EXPORT (With FX Translation) ---
 eu_active = eu_global_final.iloc[-1]
-eu_active = eu_active[eu_active != 0].copy()
+# eu_active = eu_active[eu_active != 0].copy()
 
 fx_multipliers = eu_loader.processor.process_fx(config.EU_FX_FILES)
 latest_fx = fx_multipliers.reindex(eu_data.price_ret.index).ffill().loc[last_date]
@@ -327,7 +327,6 @@ results = global_backtester.run(global_price_ret, global_div_ret, global_positio
 # --- ADVANCED METRICS CALCULATION ---
 net_pnl = results['Net PnL'] # Daily dollar PnL
 cum_pnl = results['Cumulative PnL']
-
 # Return Metrics
 annualized_pnl = net_pnl.mean() * 252
 annualized_vol = net_pnl.std() * np.sqrt(252)
@@ -340,8 +339,8 @@ max_drawdown = drawdown.min()
 
 # Benchmark Correlation (Are we actually market neutral?)
 # Re-align benchmark series just in case of missing days
-us_bench = us_data.benchmark_series.reindex(common_dates).fillna(0)
-eu_bench = eu_data.benchmark_series.reindex(common_dates).fillna(0)
+us_bench = us_data.benchmark_series.pct_change().reindex(common_dates).ffill()
+eu_bench = eu_data.benchmark_series.pct_change().reindex(common_dates).ffill()
 corr_spx = net_pnl.corr(us_bench)
 corr_sx5e = net_pnl.corr(eu_bench)
 
@@ -361,7 +360,7 @@ total_financing = results['Financing'].sum()
 
 # --- CONSOLE REPORT ---
 print(f"\n[ RETURN METRICS ]")
-print(f"  Cumulative PnL:       ${cum_pnl.iloc[-1]:,.2f}")
+print(f"  Cumulative PnL:       ${cum_pnl.iloc[-2]:,.2f}")
 print(f"  Annualized PnL:       ${annualized_pnl:,.2f}")
 print(f"  Annualized Vol:       ${annualized_vol:,.2f} (Target: $500,000)")
 print(f"  Sharpe Ratio:         {sharpe:.3f}")
