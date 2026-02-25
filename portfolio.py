@@ -160,7 +160,7 @@ class CurrencyNeutralPortfolioConstructor:
         self.trade_speed = trade_speed
         self.decay_allowance_ratio = decay_allowance_ratio
         
-        # NEW: Covariance shrinkage parameter
+        # Covariance shrinkage parameter
         self.corr_shrinkage = corr_shrinkage
 
     def _shrink_covariance(self, raw_cov_df):
@@ -186,7 +186,8 @@ class CurrencyNeutralPortfolioConstructor:
         effective_threshold = pd.Series(self.signal_threshold, index=sig_t.index)
         
         if current_positions is not None:
-            currently_held = current_positions[current_positions != 0].index
+            # Drop benchmark so we don't accidentally apply threshold logic to the hedge
+            currently_held = current_positions[current_positions != 0].drop(benchmark_ticker, errors='ignore').index
             decayed_thresh = self.signal_threshold * self.decay_allowance_ratio
             effective_threshold.loc[currently_held.intersection(sig_t.index)] = decayed_thresh
             
@@ -209,7 +210,6 @@ class CurrencyNeutralPortfolioConstructor:
                 raw_weights[curr_assets] = 0.0 
                 
         # --- 3. Volatility Scaling (Upgraded with Shrinkage) ---
-        # Apply shrinkage to the active covariance matrix to prevent optimizer from leaning on noise
         clean_cov = cov_matrix.loc[active_assets, active_assets].fillna(0.0)
         robust_cov = self._shrink_covariance(clean_cov)
         
@@ -236,23 +236,32 @@ class CurrencyNeutralPortfolioConstructor:
             
         final_positions = target_notionals.reindex(signals.index).fillna(0.0)
 
-        # --- FLAT COST DEADBAND (NO-TRADE ZONE) ---
+        # Separate stock assets from the benchmark to apply custom logic cleanly
+        assets_only = final_positions.index[final_positions.index != benchmark_ticker]
+
+        # --- 6. FLAT COST DEADBAND (NO-TRADE ZONE) ---
         if current_positions is not None:
             aligned_current = current_positions.reindex(final_positions.index).fillna(0.0)
 
             # Base the tolerance on the larger of the current or target position
-            max_pos_size = np.maximum(final_positions.abs(), aligned_current.abs())
+            max_pos_size = np.maximum(final_positions.loc[assets_only].abs(), aligned_current.loc[assets_only].abs())
             
             # Allow 15% drift + $2,500 absolute buffer to ignore tiny trades
             drift_tolerance = (max_pos_size * 0.15) + 2500
 
-            weight_diff = (final_positions - aligned_current).abs()
+            weight_diff = (final_positions.loc[assets_only] - aligned_current.loc[assets_only]).abs()
 
             inside_buffer = weight_diff <= drift_tolerance
-            final_positions[inside_buffer] = aligned_current[inside_buffer]
+            final_positions.loc[assets_only[inside_buffer]] = aligned_current.loc[assets_only[inside_buffer]]
 
         # --- 7. LINEAR TRADE DAMPENING ---
         if current_positions is not None:
-            final_positions = (aligned_current * (1.0 - self.trade_speed)) + (final_positions * self.trade_speed)
-        
+            # Dampen ASSETS ONLY. Do not dampen the benchmark hedge!
+            final_positions.loc[assets_only] = (aligned_current.loc[assets_only] * (1.0 - self.trade_speed)) + (final_positions.loc[assets_only] * self.trade_speed)
+
+        # --- 8. RECALCULATE FINAL BENCHMARK HEDGE ---
+        # The hedge must be based on the ACTUAL damped positions we are taking today
+        final_beta_exposure = (final_positions.loc[assets_only] * betas.loc[assets_only].fillna(1.0)).sum()
+        final_positions[benchmark_ticker] = -final_beta_exposure
+
         return final_positions
