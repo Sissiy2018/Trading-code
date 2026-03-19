@@ -4,7 +4,7 @@ US={
         'horizon': 10,
         'reversal_window': 10,
         'smoothing_span': 2,
-        'IC':0.073
+        'IC':0.073,
     },
     'long_term':
     {
@@ -49,6 +49,16 @@ US={
         'return_window': 3,
         'smoothing_span': 3,
         'IC': 0.0634
+    },
+    'drift_regime':
+    {
+        'horizon': 21,
+        'drift_window': 63,
+        'drift_threshold': 0.60,
+        'rev_window': 5,
+        'value_weight':0.7,
+        'smoothing_span': 3,
+        'IC': -0.0434
     }
 }
 EU={
@@ -102,5 +112,15 @@ EU={
         'return_window': 3,
         'smoothing_span': 3,
         'IC': 0.0585
+    },
+    'drift_regime':
+    {
+        'horizon': 5,
+        'drift_window': 63,
+        'drift_threshold': 0.60,
+        'rev_window': 10,
+        'value_weight': 0.7,
+        'smoothing_span': 5,
+        'IC': 0.0304
     }
 }

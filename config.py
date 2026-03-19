@@ -4,7 +4,7 @@ import os
 PARAMS = {
     'BENCHMARK': 'SPX',
     'REBALANCE_FREQ_DAYS': 2,
-    'TARGET_ANN_VOL': 475000,
+    'TARGET_ANN_VOL': 485000,
     'MAX_ADV_PCT': 0.025,
     'TCOST_BPS': 2,
     'DIV_TAX': 0.3
