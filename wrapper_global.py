@@ -83,6 +83,7 @@ def run_regional_pipeline(region='US'):
     ic_pca = cfg['pca'].get('IC', cfg['pca'].get('ic', 0.0))
     ic_def = cfg['defensive'].get('IC', cfg['defensive'].get('ic', 0.0))
     ic_regime = cfg['hmm'].get('IC', cfg['hmm'].get('ic', 0.0)) # Handles uppercase or lowercase
+    ic_volume= 0
     def get_sign(ic):
         return -1 if ic < 0 else 1
 
@@ -90,12 +91,13 @@ def run_regional_pipeline(region='US'):
         "short": short_gen.generate(data.hedged_returns) * get_sign(ic_short),
         "long": long_gen.generate(data.hedged_returns, data.earnings_yield, data.sectors) * get_sign(ic_long),
         "pca": pca_gen.generate(data.hedged_returns) * get_sign(ic_pca),
+        "volume": volume_gen.generate(data.hedged_returns, data.volume_usd),
         "regime": regime_gen.generate(data.hedged_returns) * get_sign(ic_regime),
         "defensive": defensive_gen.generate(data.hedged_returns, data.betas) * get_sign(ic_def)
     }
 
     # 4. DYNAMIC PRIOR WEIGHTING BASED ON ABSOLUTE IC
-    abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_regime), abs(ic_def)]
+    abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca),abs(ic_volume), abs(ic_regime), abs(ic_def)]
     total_abs_ic = sum(abs_ics)
     
     if total_abs_ic == 0:
@@ -106,16 +108,17 @@ def run_regional_pipeline(region='US'):
     print(f"[{region}] Flipped? Short: {'Yes' if ic_short < 0 else 'No'}, Def: {'Yes' if ic_def < 0 else 'No'}, HMM: {'Yes' if ic_regime < 0 else 'No'}")
     print(f"[{region}] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Regime:{priors[3]:.2f}, Def:{priors[4]:.2f}")
 
-    blender = RobustRegressionBlender(lookback=252, temperature=2)
+    blender = RobustRegressionBlender(lookback=252, temperature=1.5)
     final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
     
     # 5. DYNAMIC HORIZON TO TRADE_SPEED CONVERSION
     avg_horizon = (
         (cfg['short_term']['horizon'] * priors[0]) +
         (cfg['long_term']['horizon'] * priors[1]) +
-        (cfg['pca']['horizon'] * priors[2]) +
-        (cfg['hmm']['horizon'] * priors[3]) + # Now dynamically pulls the 21-day horizon
-        (cfg['defensive']['horizon'] * priors[4])
+        (cfg['pca']['horizon'])*priors[2] +
+        (cfg['volume']['horizon'] * priors[3]) +
+        (cfg['hmm']['horizon'] * priors[4]) + # Now dynamically pulls the 21-day horizon
+        (cfg['defensive']['horizon'] * priors[5])
     )
     
     dynamic_trade_speed = max(0.05, min(1.0, 2.0 / (avg_horizon + 1)))
