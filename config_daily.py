@@ -36,7 +36,7 @@ PE_FILES = [
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20181102_to_20170522_ADVfiltered.csv'),
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20200420_to_20181102_ADVfiltered.csv'),
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20210930_to_20200420_ADVfiltered.csv'),
-    os.path.join(PE_DIR, 'lseg_Price-Earning_data_20230320_to_20210930_ADVfiltered.csv'),
+    os.path.join(PE_DIR, 'lseg_Price-Earning_data_20230320_to_20211001_ADVfiltered.csv'),
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20260215_to_20230321_ADVfiltered.csv'),
     os.path.join(NEW_DATA_DIR, 'lseg_Price-Earning_data_now_to_20260212_ADVfiltered.csv')
 ]
