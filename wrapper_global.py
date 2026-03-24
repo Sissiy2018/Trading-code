@@ -15,7 +15,7 @@ from signals import (ShortTermSignalGenerator, LongTermSignalGenerator, PCASigna
                      RobustRegressionBlender, RegimePCAHMMGenerator, VolumeConvictionGenerator,
                      DefensiveSignalGenerator, EPSRevisionGenerator, robust_cross_sectional_norm)
 import glob
-from portfolio import PortfolioConstructor, CurrencyNeutralPortfolioConstructor
+from portfolio import PortfolioConstructor, CurrencyNeutralPortfolioConstructor, USPortfolioConstructor
 import config_signals
 import config_daily as config
 from backtester import Backtester
@@ -46,7 +46,7 @@ def run_regional_pipeline(region='US'):
 
     if region == 'US':
         # =================================================================
-        # US STRATEGY: 3 signals, equal-weight, no blender
+        # US STRATEGY: 3 signals (long, eps_rev, volume), equal-weight, no blender
         # =================================================================
         # Load EPS data (US only)
         eps_files = sorted([f for f in glob.glob(os.path.join(config.EPS_DIR, '*.csv')) if 'ADVfiltered' not in f])
@@ -56,8 +56,9 @@ def run_regional_pipeline(region='US'):
         eps_raw = eps_raw.sort_values(['Date', 'RIC']).drop_duplicates(subset=['Date', 'RIC'], keep='last')
         eps_pivot = eps_raw.pivot_table(index='Date', columns='RIC', values='Earnings Per Share - Mean', aggfunc='last').sort_index()
 
-        ic_long  = cfg['long_term'].get('IC', 0.0)
-        ic_eps   = cfg['eps_revision'].get('IC', 0.0)
+        ic_long   = cfg['long_term'].get('IC', 0.0)
+        ic_eps    = cfg['eps_revision'].get('IC', 0.0)
+        ic_volume = cfg['volume'].get('IC', 0.0)
 
         sig_long = LongTermSignalGenerator(
             momentum_window=cfg['long_term']['momentum_window'],
@@ -71,14 +72,20 @@ def run_regional_pipeline(region='US'):
             smoothing_span=cfg['eps_revision']['smoothing_span']
         ).generate(data.hedged_returns, eps_pivot) * get_sign(ic_eps)
 
-        # Equal-weight blend: momentum + EPS revision
-        final_signals = robust_cross_sectional_norm(sig_long + sig_eps)
+        sig_volume = VolumeConvictionGenerator(
+            volume_window=cfg['volume']['volume_window'],
+            return_window=cfg['volume']['return_window'],
+            smoothing_span=cfg['volume']['smoothing_span']
+        ).generate(data.hedged_returns, data.volume_usd) * get_sign(ic_volume)
+
+        # Equal-weight blend: momentum + EPS revision + volume conviction
+        final_signals = robust_cross_sectional_norm(sig_long + sig_eps + sig_volume)
         historical_weights = pd.DataFrame(
-            {"long": 1/2, "eps_rev": 1/2},
+            {"long": 1/3, "eps_rev": 1/3, "volume": 1/3},
             index=data.hedged_returns.index
         )
-        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon']) / 2
-        print(f"[US] Equal-weight: long + eps_rev (long-only + index hedge)")
+        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon'] + cfg['volume']['horizon']) / 3
+        print(f"[US] Equal-weight: long + eps_rev + volume (long-only + index hedge)")
 
     else:
         # =================================================================
@@ -153,7 +160,6 @@ def run_regional_pipeline(region='US'):
 
     print(f"[{region}] Constructing Portfolio...")
     adv_60d = data.volume_usd.rolling(window=60, min_periods=10).mean()
-    target_daily_vol = config.PARAMS['TARGET_ANN_VOL'] / np.sqrt(252)
 
     all_target_positions = pd.DataFrame(0.0, index=data.price_ret.index, columns=data.price_ret.columns)
     current_positions = pd.Series(0.0, index=data.price_ret.columns)
@@ -163,8 +169,14 @@ def run_regional_pipeline(region='US'):
         # =============================================================
         # US: LONG-ONLY + INDEX HEDGE (no individual stock shorts)
         # =============================================================
-        trade_speed = 0.15
-        signal_threshold = 0.55
+        portfolio_constructor = USPortfolioConstructor(
+            target_ann_vol=config.PARAMS['TARGET_ANN_VOL'],
+            max_adv_pct=config.PARAMS['MAX_ADV_PCT'],
+            signal_threshold=0.55,
+            hard_volume_limit=2000000,
+            max_gross_exposure=10000000,
+            trade_speed=0.15
+        )
 
         for i, t in enumerate(data.price_ret.index):
             if i < warmup:
@@ -175,46 +187,19 @@ def run_regional_pipeline(region='US'):
                     all_target_positions.loc[t] = current_positions
                     continue
 
-                # LONG ONLY: only positive signals above threshold
-                long_signals = sig_t[sig_t > signal_threshold].drop(benchmark, errors='ignore')
-                if len(long_signals) < 5:
+                active_assets = sig_t[sig_t > portfolio_constructor.signal_threshold].drop(benchmark, errors='ignore').index
+                if len(active_assets) < 5:
                     all_target_positions.loc[t] = current_positions
                     continue
 
-                active = long_signals.index
-                cov_small = data.tot_ret_clean[active].loc[:t].iloc[-60:].cov()
-                vols = np.sqrt(np.diag(cov_small)).clip(min=0.001)
-                vol_s = pd.Series(vols, index=active)
+                cov_matrix_small = data.tot_ret_clean[active_assets].loc[:t].iloc[-60:].cov()
+                cov_matrix = cov_matrix_small.reindex(index=data.price_ret.columns, columns=data.price_ret.columns, fill_value=0.0)
 
-                # Signal-weighted, inverse-vol scaled
-                raw_w = long_signals / vol_s
-                raw_w = raw_w / raw_w.sum()
-
-                # Vol-target scaling
-                port_var = raw_w.values @ cov_small.values @ raw_w.values
-                port_vol = np.sqrt(port_var) if port_var > 0 else 1e-6
-                scalar = min(target_daily_vol / port_vol, 10000000 / raw_w.abs().sum())
-                target_pos = raw_w * scalar
-
-                # ADV limits
-                max_pos = adv_60d.loc[t].reindex(active).fillna(0) * config.PARAMS['MAX_ADV_PCT']
-                max_pos = max_pos.clip(upper=2000000)
-                target_pos = target_pos.clip(upper=max_pos)
-
-                # Build full position vector
-                new_pos = pd.Series(0.0, index=data.price_ret.columns)
-                new_pos[active] = target_pos
-
-                # Trade dampening (stocks only)
-                assets_only = new_pos.index[new_pos.index != benchmark]
-                aligned = current_positions.reindex(new_pos.index).fillna(0)
-                new_pos[assets_only] = aligned[assets_only] * (1 - trade_speed) + new_pos[assets_only] * trade_speed
-
-                # SPX hedge: short benchmark to remove market beta
-                beta_exp = (new_pos[assets_only] * data.betas.loc[t].reindex(assets_only).fillna(1.0)).sum()
-                new_pos[benchmark] = -beta_exp
-
-                current_positions = new_pos
+                current_positions = portfolio_constructor.generate_target_positions(
+                    t=t, signals=sig_t, cov_matrix=cov_matrix,
+                    adv_60d=adv_60d.loc[t], betas=data.betas.loc[t], benchmark_ticker=benchmark,
+                    current_positions=current_positions, sectors=data.sectors
+                )
             else:
                 daily_total_ret = data.price_ret.loc[t].fillna(0) + data.div_ret.loc[t].fillna(0)
                 current_positions = current_positions * (1 + daily_total_ret)
@@ -348,53 +333,53 @@ global_positions=global_positions.iloc[:-1]
 # =================================================================================
 # 4. LIVE EXECUTION EXPORT (US AND EU)
 # =================================================================================
-print("\n========================================")
-print("         PHASE 4: LIVE EXECUTION EXPORT")
-print("========================================")
-last_date = common_dates[-1]
-print(f"Valid global signals generated for date: {last_date.date()}")
-print(f"Current Global Allocation -> US: {weight_us.iloc[-1]:.1%}, EU: {weight_eu.iloc[-1]:.1%} (Scale Factor: {vol_scale_factor.iloc[-1]:.2f}x)")
+# print("\n========================================")
+# print("         PHASE 4: LIVE EXECUTION EXPORT")
+# print("========================================")
+# last_date = common_dates[-1]
+# print(f"Valid global signals generated for date: {last_date.date()}")
+# print(f"Current Global Allocation -> US: {weight_us.iloc[-1]:.1%}, EU: {weight_eu.iloc[-1]:.1%} (Scale Factor: {vol_scale_factor.iloc[-1]:.2f}x)")
 
-# --- US EXPORT ---
-us_active = us_global_final.iloc[-1]
-# us_active = us_active[us_active != 0].copy()
-us_exec = pd.DataFrame({
-    'internal_code': us_active.index,
-    'currency': 'USD',
-    'target_notional': us_active.values.round(2)
-})
-us_exec.to_csv('target_notionals_us_t_plus_1.csv', index=False)
-print(f"Saved {len(us_exec)} US target positions.")
+# # --- US EXPORT ---
+# us_active = us_global_final.iloc[-1]
+# # us_active = us_active[us_active != 0].copy()
+# us_exec = pd.DataFrame({
+#     'internal_code': us_active.index,
+#     'currency': 'USD',
+#     'target_notional': us_active.values.round(2)
+# })
+# us_exec.to_csv('target_notionals_us_t_plus_1.csv', index=False)
+# print(f"Saved {len(us_exec)} US target positions.")
 
-# --- EU EXPORT (With FX Translation) ---
-eu_active = eu_global_final.iloc[-1]
-# eu_active = eu_active[eu_active != 0].copy()
+# # --- EU EXPORT (With FX Translation) ---
+# eu_active = eu_global_final.iloc[-1]
+# # eu_active = eu_active[eu_active != 0].copy()
 
-fx_multipliers = eu_loader.processor.process_fx(config.EU_FX_FILES)
-latest_fx = fx_multipliers.reindex(eu_data.price_ret.index).ffill().loc[last_date]
+# fx_multipliers = eu_loader.processor.process_fx(config.EU_FX_FILES)
+# latest_fx = fx_multipliers.reindex(eu_data.price_ret.index).ffill().loc[last_date]
 
-eu_exec = pd.DataFrame({
-    'internal_code': eu_active.index,
-    'currency': [eu_data.currency_dict.get(ric, 'EUR').upper() for ric in eu_active.index], 
-    'target_notional_usd': eu_active.values
-})
+# eu_exec = pd.DataFrame({
+#     'internal_code': eu_active.index,
+#     'currency': [eu_data.currency_dict.get(ric, 'EUR').upper() for ric in eu_active.index], 
+#     'target_notional_usd': eu_active.values
+# })
 
-def get_local_notional_fixed(row):
-    raw_curr = row['currency']
-    fx_col = f"{raw_curr}="
+# def get_local_notional_fixed(row):
+#     raw_curr = row['currency']
+#     fx_col = f"{raw_curr}="
     
-    # Check if we have the specific rate, otherwise fallback to EUR
-    rate = latest_fx.get(fx_col, latest_fx.get('EUR=', 1.0))
-    local_val = row['target_notional_usd'] / rate
+#     # Check if we have the specific rate, otherwise fallback to EUR
+#     rate = latest_fx.get(fx_col, latest_fx.get('EUR=', 1.0))
+#     local_val = row['target_notional_usd'] / rate
     
-    # PER USER INSTRUCTIONS: GBp is already correct as GBP value, so no /100 needed.
-    return local_val
+#     # PER USER INSTRUCTIONS: GBp is already correct as GBP value, so no /100 needed.
+#     return local_val
 
-eu_exec['target_notional'] = eu_exec.apply(get_local_notional_fixed, axis=1).round(2)
-eu_exec['currency'] = eu_exec['currency'].apply(lambda x: 'GBP' if x == 'GBP' else x) # Ensure clean label
-eu_exec = eu_exec[['internal_code', 'currency', 'target_notional']]
-eu_exec.to_csv('target_notionals_eu_t_plus_1.csv', index=False)
-print(f"Saved {len(eu_exec)} EU target positions.")
+# eu_exec['target_notional'] = eu_exec.apply(get_local_notional_fixed, axis=1).round(2)
+# eu_exec['currency'] = eu_exec['currency'].apply(lambda x: 'GBP' if x == 'GBP' else x) # Ensure clean label
+# eu_exec = eu_exec[['internal_code', 'currency', 'target_notional']]
+# eu_exec.to_csv('target_notionals_eu_t_plus_1.csv', index=False)
+# print(f"Saved {len(eu_exec)} EU target positions.")
 
 # =================================================================================
 # 5. GLOBAL BACKTESTING & ADVANCED REPORTING
