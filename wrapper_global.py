@@ -11,10 +11,12 @@ except NameError:
     pass
 
 from data_loader import PipelineDataLoader, EuropeanDataLoader
-from signals import DefensiveSignalGenerator, ShortTermSignalGenerator, LongTermSignalGenerator, PCASignalGenerator, RobustRegressionBlender, RegimePCAHMMGenerator, VolumeConvictionGenerator
-from portfolio import PortfolioConstructor, CurrencyNeutralPortfolioConstructor 
-# Assuming you saved the dictionaries in config_signals.py
-import config_signals 
+from signals import (ShortTermSignalGenerator, LongTermSignalGenerator, PCASignalGenerator,
+                     RobustRegressionBlender, RegimePCAHMMGenerator, VolumeConvictionGenerator,
+                     DefensiveSignalGenerator, EPSRevisionGenerator, robust_cross_sectional_norm)
+import glob
+from portfolio import PortfolioConstructor, CurrencyNeutralPortfolioConstructor
+import config_signals
 import config_daily as config
 from backtester import Backtester
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -36,151 +38,233 @@ def run_regional_pipeline(region='US'):
         cfg = config_signals.EU
         
     data = loader.fetch_all()
-    
-    print(f"[{region}] Generating Alphas with Optimal Parameters...")
-    
-    # 2. INSTANTIATE SIGNALS DYNAMICALLY FROM CONFIG
-    short_gen = ShortTermSignalGenerator(
-        reversal_window=cfg['short_term']['reversal_window'], 
-        smoothing_span=cfg['short_term']['smoothing_span']
-    )
-    long_gen = LongTermSignalGenerator(
-        momentum_window=cfg['long_term']['momentum_window'],
-        skip_recent=cfg['long_term']['skip_recent'],
-        smoothing_span=cfg['long_term']['smoothing_span'],
-        value_tilt_strength=cfg['long_term']['value_tilt_strength']
-    )
-    pca_gen = PCASignalGenerator(
-        n_components=cfg['pca']['n_components'],
-        cov_window=cfg['pca']['cov_window'],
-        mom_window=cfg['pca']['mom_window'],
-        rev_window=cfg['pca']['rev_window'],
-        span=cfg['pca']['span'],
-        pca_update_freq=21
-    )
-    defensive_gen = DefensiveSignalGenerator(
-        drift_window=cfg['defensive']['drift_window'],
-        vol_window=cfg['defensive']['vol_window'],
-        smoothing_span=cfg['defensive']['smoothing_span']
-    )
-    volume_gen = VolumeConvictionGenerator(
-        volume_window=cfg['volume']['volume_window'],
-        return_window=cfg['volume']['return_window'],
-        smoothing_span=cfg['volume']['smoothing_span']
-    )
-    
-    # 2. INSTANTIATE HMM DYNAMICALLY FROM CONFIG
-    regime_gen = RegimePCAHMMGenerator(
-        n_components=cfg['hmm']['n_components'],
-        pca_update_freq=cfg['hmm']['pca_update_freq'],
-        max_states=cfg['hmm']['max_states'],
-        hmm_window=cfg['hmm']['hmm_window']
-    )
 
-    # 3. EXTRACT ICs AND DETERMINE DIRECTION (Sign)
-    ic_short = cfg['short_term'].get('IC', cfg['short_term'].get('ic', 0.0))
-    ic_long = cfg['long_term'].get('IC', cfg['long_term'].get('ic', 0.0))
-    ic_pca = cfg['pca'].get('IC', cfg['pca'].get('ic', 0.0))
-    ic_def = cfg['defensive'].get('IC', cfg['defensive'].get('ic', 0.0))
-    ic_regime = cfg['hmm'].get('IC', cfg['hmm'].get('ic', 0.0)) # Handles uppercase or lowercase
-    ic_volume= 0
     def get_sign(ic):
         return -1 if ic < 0 else 1
 
-    signal_dict = {
-        "short": short_gen.generate(data.hedged_returns) * get_sign(ic_short),
-        "long": long_gen.generate(data.hedged_returns, data.earnings_yield, data.sectors) * get_sign(ic_long),
-        "pca": pca_gen.generate(data.hedged_returns) * get_sign(ic_pca),
-        "volume": volume_gen.generate(data.hedged_returns, data.volume_usd),
-        "regime": regime_gen.generate(data.hedged_returns) * get_sign(ic_regime),
-        "defensive": defensive_gen.generate(data.hedged_returns, data.betas) * get_sign(ic_def)
-    }
+    print(f"[{region}] Generating Alphas...")
 
-    # 4. DYNAMIC PRIOR WEIGHTING BASED ON ABSOLUTE IC
-    abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca),abs(ic_volume), abs(ic_regime), abs(ic_def)]
-    total_abs_ic = sum(abs_ics)
-    
-    if total_abs_ic == 0:
-        raise ValueError(f"[{region}] All signals have zero IC! Check configs.")
-        
-    priors = [ic / total_abs_ic for ic in abs_ics]
+    if region == 'US':
+        # =================================================================
+        # US STRATEGY: 3 signals, equal-weight, no blender
+        # =================================================================
+        # Load EPS data (US only)
+        eps_files = sorted([f for f in glob.glob(os.path.join(config.EPS_DIR, '*.csv')) if 'ADVfiltered' not in f])
+        print(f"[US] Loading {len(eps_files)} EPS estimate files...")
+        eps_raw = pd.concat([pd.read_csv(f) for f in eps_files], ignore_index=True)
+        eps_raw['Date'] = pd.to_datetime(eps_raw['Date'])
+        eps_raw = eps_raw.sort_values(['Date', 'RIC']).drop_duplicates(subset=['Date', 'RIC'], keep='last')
+        eps_pivot = eps_raw.pivot_table(index='Date', columns='RIC', values='Earnings Per Share - Mean', aggfunc='last').sort_index()
 
-    print(f"[{region}] Flipped? Short: {'Yes' if ic_short < 0 else 'No'}, Def: {'Yes' if ic_def < 0 else 'No'}, HMM: {'Yes' if ic_regime < 0 else 'No'}")
-    print(f"[{region}] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Regime:{priors[3]:.2f}, Def:{priors[4]:.2f}")
+        ic_long  = cfg['long_term'].get('IC', 0.0)
+        ic_eps   = cfg['eps_revision'].get('IC', 0.0)
 
-    blender = RobustRegressionBlender(lookback=252, temperature=1.5)
-    final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
-    
-    # 5. DYNAMIC HORIZON TO TRADE_SPEED CONVERSION
-    avg_horizon = (
-        (cfg['short_term']['horizon'] * priors[0]) +
-        (cfg['long_term']['horizon'] * priors[1]) +
-        (cfg['pca']['horizon'])*priors[2] +
-        (cfg['volume']['horizon'] * priors[3]) +
-        (cfg['hmm']['horizon'] * priors[4]) + # Now dynamically pulls the 21-day horizon
-        (cfg['defensive']['horizon'] * priors[5])
-    )
-    
+        sig_long = LongTermSignalGenerator(
+            momentum_window=cfg['long_term']['momentum_window'],
+            skip_recent=cfg['long_term']['skip_recent'],
+            smoothing_span=cfg['long_term']['smoothing_span'],
+            value_tilt_strength=cfg['long_term']['value_tilt_strength']
+        ).generate(data.hedged_returns, data.earnings_yield, data.sectors) * get_sign(ic_long)
+
+        sig_eps = EPSRevisionGenerator(
+            revision_window=cfg['eps_revision']['revision_window'],
+            smoothing_span=cfg['eps_revision']['smoothing_span']
+        ).generate(data.hedged_returns, eps_pivot) * get_sign(ic_eps)
+
+        # Equal-weight blend: momentum + EPS revision
+        final_signals = robust_cross_sectional_norm(sig_long + sig_eps)
+        historical_weights = pd.DataFrame(
+            {"long": 1/2, "eps_rev": 1/2},
+            index=data.hedged_returns.index
+        )
+        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon']) / 2
+        print(f"[US] Equal-weight: long + eps_rev (long-only + index hedge)")
+
+    else:
+        # =================================================================
+        # EU STRATEGY: Original 6 signals + Huber blender
+        # =================================================================
+        ic_short  = cfg['short_term'].get('IC', 0.0)
+        ic_long   = cfg['long_term'].get('IC', 0.0)
+        ic_pca    = cfg['pca'].get('IC', 0.0)
+        ic_def    = cfg['defensive'].get('IC', 0.0)
+        ic_regime = cfg['hmm'].get('IC', 0.0)
+        ic_volume = 0
+
+        signal_dict = {
+            "short": ShortTermSignalGenerator(
+                reversal_window=cfg['short_term']['reversal_window'],
+                smoothing_span=cfg['short_term']['smoothing_span']
+            ).generate(data.hedged_returns) * get_sign(ic_short),
+            "long": LongTermSignalGenerator(
+                momentum_window=cfg['long_term']['momentum_window'],
+                skip_recent=cfg['long_term']['skip_recent'],
+                smoothing_span=cfg['long_term']['smoothing_span'],
+                value_tilt_strength=cfg['long_term']['value_tilt_strength']
+            ).generate(data.hedged_returns, data.earnings_yield, data.sectors) * get_sign(ic_long),
+            "pca": PCASignalGenerator(
+                n_components=cfg['pca']['n_components'],
+                cov_window=cfg['pca']['cov_window'],
+                mom_window=cfg['pca']['mom_window'],
+                rev_window=cfg['pca']['rev_window'],
+                span=cfg['pca']['span'], pca_update_freq=21
+            ).generate(data.hedged_returns) * get_sign(ic_pca),
+            "volume": VolumeConvictionGenerator(
+                volume_window=cfg['volume']['volume_window'],
+                return_window=cfg['volume']['return_window'],
+                smoothing_span=cfg['volume']['smoothing_span']
+            ).generate(data.hedged_returns, data.volume_usd),
+            "regime": RegimePCAHMMGenerator(
+                n_components=cfg['hmm']['n_components'],
+                pca_update_freq=cfg['hmm']['pca_update_freq'],
+                max_states=cfg['hmm']['max_states'],
+                hmm_window=cfg['hmm']['hmm_window']
+            ).generate(data.hedged_returns) * get_sign(ic_regime),
+            "defensive": DefensiveSignalGenerator(
+                drift_window=cfg['defensive']['drift_window'],
+                vol_window=cfg['defensive']['vol_window'],
+                smoothing_span=cfg['defensive']['smoothing_span']
+            ).generate(data.hedged_returns, data.betas) * get_sign(ic_def)
+        }
+
+        abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_volume), abs(ic_regime), abs(ic_def)]
+        total_abs_ic = sum(abs_ics)
+        if total_abs_ic == 0:
+            raise ValueError(f"[EU] All signals have zero IC!")
+        priors = [ic / total_abs_ic for ic in abs_ics]
+
+        print(f"[EU] Flipped? Short: {'Yes' if ic_short < 0 else 'No'}, Def: {'Yes' if ic_def < 0 else 'No'}, HMM: {'Yes' if ic_regime < 0 else 'No'}")
+        print(f"[EU] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Vol:{priors[3]:.2f}, HMM:{priors[4]:.2f}, Def:{priors[5]:.2f}")
+
+        blender = RobustRegressionBlender(lookback=252, temperature=1.5)
+        final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
+        historical_weights = blender.historical_weights
+        avg_horizon = (
+            (cfg['short_term']['horizon'] * priors[0]) +
+            (cfg['long_term']['horizon'] * priors[1]) +
+            (cfg['pca']['horizon'] * priors[2]) +
+            (cfg['volume']['horizon'] * priors[3]) +
+            (cfg['hmm']['horizon'] * priors[4]) +
+            (cfg['defensive']['horizon'] * priors[5])
+        )
+
     dynamic_trade_speed = max(0.05, min(1.0, 2.0 / (avg_horizon + 1)))
     print(f"[{region}] Blended Horizon: {avg_horizon:.1f} days -> Dynamic Trade Speed: {dynamic_trade_speed:.3f}")
 
     print(f"[{region}] Constructing Portfolio...")
     adv_60d = data.volume_usd.rolling(window=60, min_periods=10).mean()
-    
-    curr_dict = getattr(data, 'currency_dict', None)
-    if region == 'EU':
-        portfolio_constructor = CurrencyNeutralPortfolioConstructor(
-            target_ann_vol=config.PARAMS['TARGET_ANN_VOL'],
-            max_adv_pct=config.PARAMS['MAX_ADV_PCT'],
-            signal_threshold=0.75,     
-            hard_volume_limit=2000000, 
-            max_gross_exposure=10000000,
-            currency_dict=curr_dict,
-            trade_speed=dynamic_trade_speed # <-- PASSED HERE
-        )
-    else:
-        portfolio_constructor = PortfolioConstructor(
-            target_ann_vol=config.PARAMS['TARGET_ANN_VOL'],
-            max_adv_pct=config.PARAMS['MAX_ADV_PCT'],
-            signal_threshold=0.55,     
-            hard_volume_limit=2000000, 
-            max_gross_exposure=10000000,
-            trade_speed=dynamic_trade_speed # <-- PASSED HERE
-        )
+    target_daily_vol = config.PARAMS['TARGET_ANN_VOL'] / np.sqrt(252)
 
     all_target_positions = pd.DataFrame(0.0, index=data.price_ret.index, columns=data.price_ret.columns)
     current_positions = pd.Series(0.0, index=data.price_ret.columns)
     warmup = 252 + 60
 
-    for i, t in enumerate(data.price_ret.index):
-        if i < warmup:
-            continue
-        if i % config.PARAMS['REBALANCE_FREQ_DAYS'] == 0:
-            sig_t = final_signals.loc[t]
-            if sig_t.isna().all():
-                all_target_positions.loc[t] = current_positions
+    if region == 'US':
+        # =============================================================
+        # US: LONG-ONLY + INDEX HEDGE (no individual stock shorts)
+        # =============================================================
+        trade_speed = 0.15
+        signal_threshold = 0.55
+
+        for i, t in enumerate(data.price_ret.index):
+            if i < warmup:
                 continue
+            if i % config.PARAMS['REBALANCE_FREQ_DAYS'] == 0:
+                sig_t = final_signals.loc[t]
+                if sig_t.isna().all():
+                    all_target_positions.loc[t] = current_positions
+                    continue
 
-            active_assets = sig_t[sig_t.abs() > portfolio_constructor.signal_threshold].index
-            if len(active_assets) < 5:
-                all_target_positions.loc[t] = current_positions
+                # LONG ONLY: only positive signals above threshold
+                long_signals = sig_t[sig_t > signal_threshold].drop(benchmark, errors='ignore')
+                if len(long_signals) < 5:
+                    all_target_positions.loc[t] = current_positions
+                    continue
+
+                active = long_signals.index
+                cov_small = data.tot_ret_clean[active].loc[:t].iloc[-60:].cov()
+                vols = np.sqrt(np.diag(cov_small)).clip(min=0.001)
+                vol_s = pd.Series(vols, index=active)
+
+                # Signal-weighted, inverse-vol scaled
+                raw_w = long_signals / vol_s
+                raw_w = raw_w / raw_w.sum()
+
+                # Vol-target scaling
+                port_var = raw_w.values @ cov_small.values @ raw_w.values
+                port_vol = np.sqrt(port_var) if port_var > 0 else 1e-6
+                scalar = min(target_daily_vol / port_vol, 10000000 / raw_w.abs().sum())
+                target_pos = raw_w * scalar
+
+                # ADV limits
+                max_pos = adv_60d.loc[t].reindex(active).fillna(0) * config.PARAMS['MAX_ADV_PCT']
+                max_pos = max_pos.clip(upper=2000000)
+                target_pos = target_pos.clip(upper=max_pos)
+
+                # Build full position vector
+                new_pos = pd.Series(0.0, index=data.price_ret.columns)
+                new_pos[active] = target_pos
+
+                # Trade dampening (stocks only)
+                assets_only = new_pos.index[new_pos.index != benchmark]
+                aligned = current_positions.reindex(new_pos.index).fillna(0)
+                new_pos[assets_only] = aligned[assets_only] * (1 - trade_speed) + new_pos[assets_only] * trade_speed
+
+                # SPX hedge: short benchmark to remove market beta
+                beta_exp = (new_pos[assets_only] * data.betas.loc[t].reindex(assets_only).fillna(1.0)).sum()
+                new_pos[benchmark] = -beta_exp
+
+                current_positions = new_pos
+            else:
+                daily_total_ret = data.price_ret.loc[t].fillna(0) + data.div_ret.loc[t].fillna(0)
+                current_positions = current_positions * (1 + daily_total_ret)
+
+            all_target_positions.loc[t] = current_positions
+
+    else:
+        # =============================================================
+        # EU: ORIGINAL LONG-SHORT WITH CURRENCY-NEUTRAL CONSTRUCTOR
+        # =============================================================
+        curr_dict = getattr(data, 'currency_dict', None)
+        portfolio_constructor = CurrencyNeutralPortfolioConstructor(
+            target_ann_vol=config.PARAMS['TARGET_ANN_VOL'],
+            max_adv_pct=config.PARAMS['MAX_ADV_PCT'],
+            signal_threshold=0.75,
+            hard_volume_limit=2000000,
+            max_gross_exposure=10000000,
+            currency_dict=curr_dict,
+            trade_speed=dynamic_trade_speed
+        )
+
+        for i, t in enumerate(data.price_ret.index):
+            if i < warmup:
                 continue
-                
-            cov_matrix_small = data.tot_ret_clean[active_assets].loc[:t].iloc[-60:].cov()
-            cov_matrix = cov_matrix_small.reindex(index=data.price_ret.columns, columns=data.price_ret.columns, fill_value=0.0)
-            
-            current_positions = portfolio_constructor.generate_target_positions(
-                t=t, signals=sig_t, cov_matrix=cov_matrix, 
-                adv_60d=adv_60d.loc[t], betas=data.betas.loc[t], benchmark_ticker=benchmark,
-                current_positions=current_positions 
-            )
-        else:
-            daily_total_ret = data.price_ret.loc[t].fillna(0) + data.div_ret.loc[t].fillna(0)
-            current_positions = current_positions * (1 + daily_total_ret)
+            if i % config.PARAMS['REBALANCE_FREQ_DAYS'] == 0:
+                sig_t = final_signals.loc[t]
+                if sig_t.isna().all():
+                    all_target_positions.loc[t] = current_positions
+                    continue
 
-        all_target_positions.loc[t] = current_positions
+                active_assets = sig_t[sig_t.abs() > portfolio_constructor.signal_threshold].index
+                if len(active_assets) < 5:
+                    all_target_positions.loc[t] = current_positions
+                    continue
 
-    return data, all_target_positions, loader, blender.historical_weights
+                cov_matrix_small = data.tot_ret_clean[active_assets].loc[:t].iloc[-60:].cov()
+                cov_matrix = cov_matrix_small.reindex(index=data.price_ret.columns, columns=data.price_ret.columns, fill_value=0.0)
+
+                current_positions = portfolio_constructor.generate_target_positions(
+                    t=t, signals=sig_t, cov_matrix=cov_matrix,
+                    adv_60d=adv_60d.loc[t], betas=data.betas.loc[t], benchmark_ticker=benchmark,
+                    current_positions=current_positions
+                )
+            else:
+                daily_total_ret = data.price_ret.loc[t].fillna(0) + data.div_ret.loc[t].fillna(0)
+                current_positions = current_positions * (1 + daily_total_ret)
+
+            all_target_positions.loc[t] = current_positions
+
+    return data, all_target_positions, loader, historical_weights
 
 
 # =================================================================================

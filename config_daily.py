@@ -47,6 +47,9 @@ SP_FILES = [
 ]
 STATIC_FILE = os.path.join(STATIC_DIR, 'lseg_static_data_20260216.csv')
 
+# --- EPS Estimate Data ---
+EPS_DIR = os.path.join(BASE_DIR, 'History_EPS_estimate')
+
 # ==========================================
 # --- 4. European Pipeline Parameters ---
 # ==========================================
@@ -88,3 +91,6 @@ EU_BENCHMARK_FILES = [
     os.path.join(NEW_EUR_DATA_DIR, 'stoxx_historyprice_Eurostoxx50_now_to_20260219.csv')
 ]
 EU_STATIC_FILE = os.path.join(EU_STATIC_DIR, 'stoxx_static_data_20260220.csv')
+
+# --- EU EPS Estimate Data ---
+EU_EPS_DIR = os.path.join(EU_BASE_DIR, 'History_EPS_estimate')
