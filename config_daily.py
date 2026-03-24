@@ -19,6 +19,28 @@ SP_DIR = os.path.join(BASE_DIR, 'S&P')
 STATIC_DIR = os.path.join(BASE_DIR, 'Static_data')
 
 # --- 3. File Lists ---
+#PRICE_FILES = [
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20170522_to_20151208.csv'),
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20181102_to_20170522.csv'),
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20200420_to_20181102.csv'),
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20210930_to_20200420.csv'),
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20230319_to_20210930.csv'),
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20240828_to_20230320.csv'),
+    #os.path.join(PRICE_DIR, 'lseg_historyprice_data_20260214_to_20240829.csv'),
+    #os.path.join(NEW_DATA_DIR, 'lseg_historyprice_data_now_to_20260212.csv')
+#]
+
+#PE_FILES = [
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20170522_to_20151208.csv'),
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20181102_to_20170522.csv'),
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20181102_to_20170522.csv'),
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20200420_to_20181102.csv'),
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20210930_to_20200420.csv'),
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20230320_to_20210930.csv'),
+    #os.path.join(PE_DIR, 'lseg_Price-Earning_data_20260216_to_20230321.csv'),
+    #os.path.join(NEW_DATA_DIR, 'lseg_Price-Earning_data_now_to_20260212.csv')
+#]
+
 PRICE_FILES = [
     os.path.join(PRICE_DIR, 'lseg_historyprice_data_20170522_to_20151208_ADVfiltered.csv'),
     os.path.join(PRICE_DIR, 'lseg_historyprice_data_20181102_to_20170522_ADVfiltered.csv'),
