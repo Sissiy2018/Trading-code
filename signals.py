@@ -64,21 +64,21 @@ class ShortTermSignalGenerator:
         print(f"  -> Generating Short-Term Signals ({self.window}d Reversal)...")
         # 1. Calculate short-term returns
         ret_short = hedged_returns.rolling(self.window, min_periods=self.window-2).sum()
-        
+
         # 2. Cross-sectional Z-score
         cs_mean = ret_short.mean(axis=1)
         cs_std = ret_short.std(axis=1)
         z_score = ret_short.sub(cs_mean, axis=0).div(cs_std + 1e-8, axis=0)
-        
+
         # 3. Invert for Mean Reversion (Buy losers, sell winners)
         signal = z_score
-        
+
         # Smooth the raw signals if you aren't already
         sig_df = signal.ewm(span=self.span, min_periods=1).mean()
 
         # SWAP TO ROBUST NORMALIZATION
         final_z = robust_cross_sectional_norm(sig_df)
-        
+
         return final_z
 
 
@@ -589,4 +589,64 @@ class DefensiveSignalGenerator:
         
         final_z = robust_cross_sectional_norm(smoothed_defensive)
         return final_z
-    
+
+
+class EPSRevisionGenerator:
+    """
+    Earnings revision momentum: exploits the market's systematic underreaction
+    to changes in analyst EPS consensus estimates.
+
+    When analysts revise earnings estimates upward, the stock tends to continue
+    outperforming for weeks/months (Post-Revision Drift). Vice versa for
+    downward revisions.
+
+    Uses a 1-DAY LAG on EPS data for look-ahead safety: estimate published
+    on date D is used starting from signal on date D+1. This ensures no
+    intraday timing ambiguity.
+
+    References:
+      Chan, Jegadeesh, Lakonishok (1996) "Momentum Strategies"
+      Moore & Velikov (2024) "Oil Price Exposure and Cross-Section of Stock Returns"
+
+    Look-ahead safety:
+      eps_lagged[t]    = ffill'd EPS estimate as of t-1 (1-day lag)
+      eps_prev[t]      = ffill'd EPS estimate as of t-1-W
+      revision_pct[t]  = (eps_lagged - eps_prev) / (|eps_prev| + 0.01)
+      All inputs from t-1 or earlier; signal at t predicts returns from t+1.
+    """
+    def __init__(self, revision_window=21, smoothing_span=5):
+        self.revision_window = revision_window
+        self.smoothing_span = smoothing_span
+
+    def generate(self, hedged_returns, eps_pivot):
+        """
+        Args:
+            hedged_returns: DataFrame (dates × stocks) for calendar/universe alignment.
+            eps_pivot: DataFrame (dates × RICs) of EPS Mean estimates at irregular freq.
+        """
+        print(f"  -> Generating EPS Revision Signal "
+              f"(window={self.revision_window}d)...")
+
+        # 1. Align EPS to equity trading calendar and universe
+        common_cols = hedged_returns.columns.intersection(eps_pivot.columns)
+        eps_aligned = eps_pivot[common_cols].reindex(hedged_returns.index).ffill()
+
+        # 2. LAG BY 1 DAY — bulletproof against intraday timing
+        eps_lagged = eps_aligned.shift(1)
+
+        # 3. Revision: percentage change over window
+        eps_prev = eps_lagged.shift(self.revision_window)
+        revision_pct = (eps_lagged - eps_prev) / (eps_prev.abs() + 0.01)
+
+        # 4. Clip extreme revisions (fiscal year rolls, data errors)
+        revision_pct = revision_pct.clip(-1.0, 1.0)
+
+        # 5. Smooth and normalize
+        smoothed = revision_pct.ewm(span=self.smoothing_span, min_periods=1).mean()
+
+        # 6. Reindex to full universe (stocks without EPS data get 0 = neutral)
+        signal = robust_cross_sectional_norm(smoothed)
+        signal = signal.reindex(columns=hedged_returns.columns, fill_value=0.0)
+
+        return signal
+

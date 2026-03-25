@@ -59,6 +59,13 @@ US={
         'value_weight':0.7,
         'smoothing_span': 3,
         'IC': -0.0434
+    },
+    'eps_revision':
+    {
+        'horizon': 21,
+        'revision_window': 63,
+        'smoothing_span': 3,
+        'IC': 0.009
     }
 }
 EU={
@@ -122,5 +129,12 @@ EU={
         'value_weight': 0.7,
         'smoothing_span': 5,
         'IC': 0.0304
+    },
+    'eps_revision':
+    {
+        'horizon': 21,
+        'revision_window': 63,
+        'smoothing_span': 3,
+        'IC': 0.005
     }
 }

@@ -146,6 +146,133 @@ class PortfolioConstructor:
 
 
 
+class USPortfolioConstructor:
+    """Long-only US portfolio constructor. Mirrors EU class structure but without
+    dollar neutrality or currency neutralisation. Takes only long positions above
+    the signal threshold and hedges residual beta via the benchmark."""
+
+    def __init__(self, target_ann_vol, max_adv_pct, signal_threshold, hard_volume_limit,
+                 max_gross_exposure, trade_speed=0.15, decay_allowance_ratio=0.50,
+                 corr_shrinkage=0.20, min_sector_stocks=2):
+        self.target_ann_vol = target_ann_vol
+        self.max_adv_pct = max_adv_pct
+        self.signal_threshold = signal_threshold
+        self.hard_volume_limit = hard_volume_limit
+        self.max_gross_exposure = max_gross_exposure
+        self.trade_speed = trade_speed
+        self.decay_allowance_ratio = decay_allowance_ratio
+        self.corr_shrinkage = corr_shrinkage
+        self.min_sector_stocks = min_sector_stocks
+
+    def _shrink_covariance(self, raw_cov_df):
+        """Preserves exact standard deviations but shrinks noisy correlations towards 0."""
+        raw_cov = raw_cov_df.values
+        vols = np.sqrt(np.diag(raw_cov))
+        safe_vols = np.clip(vols, a_min=1e-6, a_max=None)
+        outer_vols = np.outer(safe_vols, safe_vols)
+        corr_matrix = raw_cov / outer_vols
+        identity_mat = np.eye(len(raw_cov))
+        robust_corr = (1.0 - self.corr_shrinkage) * corr_matrix + (self.corr_shrinkage * identity_mat)
+        robust_cov = robust_corr * outer_vols
+        return pd.DataFrame(robust_cov, index=raw_cov_df.index, columns=raw_cov_df.columns)
+
+    def generate_target_positions(self, t, signals, cov_matrix, adv_60d, betas, benchmark_ticker,
+                                   current_positions=None, sectors=None):
+        sig_t = signals.dropna()
+        if len(sig_t) < 10:
+            return pd.Series(0.0, index=signals.index)
+
+        # --- 1. SIGNAL HYSTERESIS ---
+        effective_threshold = pd.Series(self.signal_threshold, index=sig_t.index)
+        if current_positions is not None:
+            currently_held = current_positions[current_positions > 0].drop(benchmark_ticker, errors='ignore').index
+            decayed_thresh = self.signal_threshold * self.decay_allowance_ratio
+            effective_threshold.loc[currently_held.intersection(sig_t.index)] = decayed_thresh
+
+        # --- 2. LONG-ONLY FILTER (no shorts, no dollar neutrality) ---
+        long_signals = sig_t[sig_t > effective_threshold].drop(benchmark_ticker, errors='ignore')
+        active_assets = long_signals.index
+
+        if len(active_assets) < 5:
+            return pd.Series(0.0, index=signals.index)
+
+        # --- 2.5 SECTOR EQUALISATION (optional) ---
+        # Drop sectors with fewer than min_sector_stocks active signals (regularisation),
+        # then rescale so each remaining sector has equal gross weight.
+        # Within-sector relative weights are preserved.
+        if sectors is not None:
+            sector_map = sectors.reindex(active_assets).fillna('UNKNOWN')
+            sector_counts = sector_map.value_counts()
+            valid_sectors = sector_counts[sector_counts >= self.min_sector_stocks].index
+            valid_mask = sector_map.isin(valid_sectors)
+            if valid_mask.sum() >= 5:
+                active_assets = active_assets[valid_mask]
+                long_signals = long_signals.loc[active_assets]
+
+        # --- 3. SIGNAL-WEIGHTED, INVERSE-VOL SCALING ---
+        clean_cov = cov_matrix.loc[active_assets, active_assets].fillna(0.0)
+        robust_cov = self._shrink_covariance(clean_cov)
+
+        vols = np.sqrt(np.diag(robust_cov)).clip(min=0.001)
+        vol_series = pd.Series(vols, index=active_assets)
+
+        raw_weights = long_signals / vol_series
+
+        # Equalise sector gross weights: each sector contributes 1/N_sectors of the book
+        if sectors is not None and valid_mask.sum() >= 5:
+            sector_map_active = sectors.reindex(active_assets).fillna('UNKNOWN')
+            sector_totals = raw_weights.groupby(sector_map_active).transform('sum')
+            n_sectors = sector_map_active.nunique()
+            raw_weights = (raw_weights / sector_totals) / n_sectors
+        else:
+            raw_weights = raw_weights / raw_weights.sum()
+
+        # --- 4. VOLATILITY SCALING ---
+        w_array = raw_weights.values
+        port_var = w_array.T @ robust_cov.values @ w_array
+        if port_var <= 0:
+            return pd.Series(0.0, index=signals.index)
+
+        port_vol = np.sqrt(port_var * 252)
+        vol_scalar = self.target_ann_vol / port_vol
+        target_notionals = raw_weights * vol_scalar
+
+        # --- 5. ADV LIMITS ---
+        max_allowed_adv = adv_60d.reindex(active_assets).fillna(0) * self.max_adv_pct
+        max_allowed = np.minimum(max_allowed_adv, self.hard_volume_limit)
+        target_notionals = target_notionals.clip(upper=max_allowed)
+
+        # --- 6. MAX GROSS EXPOSURE ---
+        gross_exposure = target_notionals.abs().sum()
+        if gross_exposure > self.max_gross_exposure:
+            target_notionals *= self.max_gross_exposure / gross_exposure
+
+        final_positions = target_notionals.reindex(signals.index).fillna(0.0)
+        assets_only = final_positions.index[final_positions.index != benchmark_ticker]
+
+        # --- 7. FLAT COST DEADBAND (NO-TRADE ZONE) ---
+        if current_positions is not None:
+            aligned_current = current_positions.reindex(final_positions.index).fillna(0.0)
+            max_pos_size = np.maximum(final_positions.loc[assets_only].abs(), aligned_current.loc[assets_only].abs())
+            drift_tolerance = (max_pos_size * 0.15) + 2500
+            weight_diff = (final_positions.loc[assets_only] - aligned_current.loc[assets_only]).abs()
+            inside_buffer = weight_diff <= drift_tolerance
+            final_positions.loc[assets_only[inside_buffer]] = aligned_current.loc[assets_only[inside_buffer]]
+
+        # --- 8. LINEAR TRADE DAMPENING ---
+        if current_positions is not None:
+            final_positions.loc[assets_only] = (
+                aligned_current.loc[assets_only] * (1.0 - self.trade_speed) +
+                final_positions.loc[assets_only] * self.trade_speed
+            )
+
+        # --- 9. RECALCULATE FINAL BETA HEDGE ---
+        final_beta_exposure = (final_positions.loc[assets_only] * betas.loc[assets_only].fillna(1.0)).sum()
+        final_positions[benchmark_ticker] = -final_beta_exposure
+
+        return final_positions
+
+
 class CurrencyNeutralPortfolioConstructor:
     def __init__(self, target_ann_vol, max_adv_pct, signal_threshold, hard_volume_limit, max_gross_exposure, currency_dict,
                  trade_speed=0.50, decay_allowance_ratio=0.50, corr_shrinkage=0.20):
