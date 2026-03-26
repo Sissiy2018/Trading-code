@@ -145,9 +145,11 @@ A percentile rank based on the Earnings Quality Model algorithm in which a secur
 I did not find **MarketPsych Analytics**, but I have found something useful, tell me if you want those data:
 
 ## Combined Alpha Model Region Rank 
-**Field:** `TR.CombinedAlphaRegionRank`
+**Field:** `TR.CombinedAlphaRegionRank` `TR.CombinedAlphaSectorRank`
 
-The regional 1-100 percentile rank based on StarMine Combined Alpha Model, which combines the available StarMine models in the optimal, static, linear weighting scheme for each region. Scores of 100 indicate the highest rated stocks in the region; scores of 1 indicate the lowest rated stocks in the region. StarMine models included in the Combined Alpha Model are: Analyst Revisions, Earnings Quality, Relative Valuation, Intrinsic Valuation, Price Momentum, Smart Holdings, Insider Filings (US only), and Short Interest (US only).
+The regional 1-100 percentile rank based on StarMine Combined Alpha Model, which combines the available StarMine models in the optimal, static, linear weighting scheme for each region. Scores of 100 indicate the highest rated stocks in the region; scores of 1 indicate the lowest rated stocks in the region. **StarMine models included in the Combined Alpha Model are: Analyst Revisions, Earnings Quality, Relative Valuation, Intrinsic Valuation, Price Momentum, Smart Holdings, Insider Filings (US only), and Short Interest (US only).**
+
+
 
 
 ## Credit Text Mining News Component
