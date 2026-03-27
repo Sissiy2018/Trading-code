@@ -123,3 +123,37 @@ SmartEstimate is available for:
 - Net Income  
 
 If you need additional SmartEstimate data, search for **DIB** in Workspace.
+
+---
+
+## StarMine Analyst Revisions Model
+**Field:** `TR.ARMIntraGlobalScore`, `TR.ARMIntraSectorScore` NOT TIME SERIES!!!
+
+A percentile rank based on the Analyst Revisions Model algorithm in which a security is compared to all other securities in the **same region and sector**/ all global secturities. Scores of 100 indicate the highest rated stocks in the sector, scores of 1 indicate the lowest rated stocks in the sector. ARM is highly predictive of relative price movement and is effective across stocks in each capitalization category, investment style, and market sector. Although ARM is a proprietary model, you can observe the key drivers on a stock by looking at individual revision components. ARM Intraday model **updates scores every hour-24 times a day**. Thus, whenever a security experiences an update to its SmartEstimate, the model recalculates its score.
+
+
+---
+
+## Earnings Quality Region Rank
+**Field:** `TR.EQCountryListRank` NOT TIME SERIES!!!
+
+A percentile rank based on the Earnings Quality Model algorithm in which a security is compared to all other securities trading in the same region. Scores of 100 indicate the highest rated stocks in the region; scores of 1 indicate the lowest rated stocks in the region. **Earnings Quality: The degree to which past earnings are reliable and likely to persist.** StarMine's Earnings Quality model is a directional model that measures earnings sustainability across four factors: accruals, cash flow, operational efficiency and the company's use of exclusions.
+
+
+---
+
+I did not find **MarketPsych Analytics**, but I have found something useful, tell me if you want those data:
+
+## Combined Alpha Model Region Rank 
+**Field:** `TR.CombinedAlphaRegionRank` `TR.CombinedAlphaSectorRank`
+
+The regional 1-100 percentile rank based on StarMine Combined Alpha Model, which combines the available StarMine models in the optimal, static, linear weighting scheme for each region. Scores of 100 indicate the highest rated stocks in the region; scores of 1 indicate the lowest rated stocks in the region. **StarMine models included in the Combined Alpha Model are: Analyst Revisions, Earnings Quality, Relative Valuation, Intrinsic Valuation, Price Momentum, Smart Holdings, Insider Filings (US only), and Short Interest (US only).**
+
+
+
+
+## Credit Text Mining News Component
+**Field:** `TR.CreditTextNewsComp` NOT TIME SERIES!!!
+
+The current global 1-100 rank of a company's credit riskiness based on textual data in Reuters news articles according to the StarMine Text Mining Credit Risk Model. Lower risk companies are given higher scores.
+
