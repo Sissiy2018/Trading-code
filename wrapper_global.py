@@ -78,14 +78,28 @@ def run_regional_pipeline(region='US'):
             smoothing_span=cfg['volume']['smoothing_span']
         ).generate(data.hedged_returns, data.volume_usd) * get_sign(ic_volume)
 
-        # Equal-weight blend: momentum + EPS revision + volume conviction
-        final_signals = robust_cross_sectional_norm(sig_long + sig_eps + sig_volume)
+        # Price Target revision signal (1-day lag for look-ahead safety)
+        pt_files = sorted(glob.glob(os.path.join('.', 'Hist_data_Russel3000', 'Other', 'lseg_multi_data_*_ADVfiltered.csv')))
+        pt_raw = pd.concat([pd.read_csv(f, encoding='utf-8-sig') for f in pt_files], ignore_index=True)
+        pt_raw['Date'] = pd.to_datetime(pt_raw['Date'])
+        pt_raw = pt_raw.sort_values(['Date','RIC']).drop_duplicates(subset=['Date','RIC'], keep='last')
+        pt_pivot = pt_raw.pivot_table(index='Date', columns='RIC', values='Price Target - Mean', aggfunc='last').sort_index()
+        pt_common = data.hedged_returns.columns.intersection(pt_pivot.columns)
+        pt_lagged = pt_pivot[pt_common].reindex(data.hedged_returns.index).ffill().shift(1)
+        pt_prev = pt_lagged.shift(63)
+        pt_rev = ((pt_lagged - pt_prev) / (pt_prev.abs() + 0.01)).clip(-1.0, 1.0)
+        sig_pt = robust_cross_sectional_norm(pt_rev.ewm(span=3, min_periods=1).mean())
+        sig_pt = sig_pt.reindex(columns=data.hedged_returns.columns, fill_value=0.0)
+        print(f"  -> Generating Price Target Revision Signal (63d window)...")
+
+        # Equal-weight blend: momentum + EPS revision + volume conviction + price target
+        final_signals = robust_cross_sectional_norm(sig_long + sig_eps + sig_volume + sig_pt)
         historical_weights = pd.DataFrame(
-            {"long": 1/3, "eps_rev": 1/3, "volume": 1/3},
+            {"long": 1/4, "eps_rev": 1/4, "volume": 1/4, "pt_rev": 1/4},
             index=data.hedged_returns.index
         )
-        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon'] + cfg['volume']['horizon']) / 3
-        print(f"[US] Equal-weight: long + eps_rev + volume (long-only + index hedge)")
+        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon'] + cfg['volume']['horizon'] + 21) / 4
+        print(f"[US] Equal-weight: long + eps_rev + volume + pt_rev (long-only + index hedge)")
 
     else:
         # =================================================================
@@ -134,14 +148,29 @@ def run_regional_pipeline(region='US'):
             ).generate(data.hedged_returns, data.betas) * get_sign(ic_def)
         }
 
-        abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_volume), abs(ic_regime), abs(ic_def)]
+        # Recommendation change signal (1-day lag for look-ahead safety)
+        rec_files = sorted(glob.glob(os.path.join('.', 'Hist_data_Stoxx600', 'Other', 'stoxx_multi_data_*.csv')))
+        rec_raw = pd.concat([pd.read_csv(f, encoding='utf-8-sig') for f in rec_files], ignore_index=True)
+        rec_raw['Date'] = pd.to_datetime(rec_raw['Date'])
+        rec_raw = rec_raw.sort_values(['Date','RIC']).drop_duplicates(subset=['Date','RIC'], keep='last')
+        rec_pivot = rec_raw.pivot_table(index='Date', columns='RIC', values='Recommendation - Mean (1-5)', aggfunc='last').sort_index()
+        rec_common = data.hedged_returns.columns.intersection(rec_pivot.columns)
+        rec_lagged = rec_pivot[rec_common].reindex(data.hedged_returns.index).ffill().shift(1)
+        rec_prev = rec_lagged.shift(63)
+        rec_change = (rec_lagged - rec_prev).clip(-2.0, 2.0).ewm(span=3, min_periods=1).mean()
+        sig_rec = robust_cross_sectional_norm(-rec_change)  # negate: decrease in rec = upgrade = positive
+        sig_rec = sig_rec.reindex(columns=data.hedged_returns.columns, fill_value=0.0)
+        signal_dict["rec_change"] = sig_rec
+        print(f"  -> Generating Recommendation Change Signal (63d window)...")
+
+        abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_volume), abs(ic_regime), abs(ic_def), 0.02]
         total_abs_ic = sum(abs_ics)
         if total_abs_ic == 0:
             raise ValueError(f"[EU] All signals have zero IC!")
         priors = [ic / total_abs_ic for ic in abs_ics]
 
         print(f"[EU] Flipped? Short: {'Yes' if ic_short < 0 else 'No'}, Def: {'Yes' if ic_def < 0 else 'No'}, HMM: {'Yes' if ic_regime < 0 else 'No'}")
-        print(f"[EU] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Vol:{priors[3]:.2f}, HMM:{priors[4]:.2f}, Def:{priors[5]:.2f}")
+        print(f"[EU] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Vol:{priors[3]:.2f}, HMM:{priors[4]:.2f}, Def:{priors[5]:.2f}, Rec:{priors[6]:.2f}")
 
         blender = RobustRegressionBlender(lookback=252, temperature=1.5)
         final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
@@ -152,7 +181,8 @@ def run_regional_pipeline(region='US'):
             (cfg['pca']['horizon'] * priors[2]) +
             (cfg['volume']['horizon'] * priors[3]) +
             (cfg['hmm']['horizon'] * priors[4]) +
-            (cfg['defensive']['horizon'] * priors[5])
+            (cfg['defensive']['horizon'] * priors[5]) +
+            (21 * priors[6])
         )
 
     dynamic_trade_speed = max(0.05, min(1.0, 2.0 / (avg_horizon + 1)))
@@ -291,8 +321,8 @@ dynamic_weight_eu = exp_eu / (exp_us + exp_eu)
 
 # --- NEW: BAYESIAN PRIOR BLENDING ---
 # 1. Define your structural base weights
-prior_us = 0.3
-prior_eu = 0.7
+prior_us = 0.4
+prior_eu = 0.6
 
 # 2. Define how strongly you trust the prior vs. the dynamic momentum (0.0 to 1.0)
 #    0.0 = Fully dynamic (ignores prior), 1.0 = Fully static (pegs to prior)
@@ -329,26 +359,31 @@ eu_global_final = eu_pos_weighted.multiply(vol_scale_factor, axis=0)
 
 # Combine into one massive global position matrix
 global_positions = pd.concat([us_global_final, eu_global_final], axis=1)
-global_positions=global_positions.iloc[:-1]
-# =================================================================================
-# 4. LIVE EXECUTION EXPORT (US AND EU)
+# global_positions=global_positions.iloc[:-1]
 # =================================================================================
 # print("\n========================================")
-# print("         PHASE 4: LIVE EXECUTION EXPORT")
+# print(" PHASE 4: LIVE EXECUTION EXPORT")
 # print("========================================")
 # last_date = common_dates[-1]
 # print(f"Valid global signals generated for date: {last_date.date()}")
 # print(f"Current Global Allocation -> US: {weight_us.iloc[-1]:.1%}, EU: {weight_eu.iloc[-1]:.1%} (Scale Factor: {vol_scale_factor.iloc[-1]:.2f}x)")
-
+# todays_date= '2026-03-30'
 # # --- US EXPORT ---
 # us_active = us_global_final.iloc[-1]
 # # us_active = us_active[us_active != 0].copy()
 # us_exec = pd.DataFrame({
-#     'internal_code': us_active.index,
-#     'currency': 'USD',
-#     'target_notional': us_active.values.round(2)
+# 'internal_code': us_active.index,
+# 'currency': 'USD',
+# 'target_notional': us_active.values.round(2)
 # })
-# us_exec.to_csv('target_notionals_us_t_plus_1.csv', index=False)
+
+# past=pd.read_csv('/Users/giladfibeesh/Documents/Python/qrt_academy/US/2026-03-20.csv')
+# list(past['internal_code'])
+# missing=set(past['internal_code'])-set(us_exec['internal_code'])
+# # add missing 0.0 target_notional to all the missing ones:
+# for code in missing:
+#     us_exec.loc[len(us_exec)] = [code, 'USD', 0.0]
+# us_exec.to_csv(f'/Users/giladfibeesh/Documents/Python/qrt_academy/US/{todays_date}.csv', index=False)
 # print(f"Saved {len(us_exec)} US target positions.")
 
 # # --- EU EXPORT (With FX Translation) ---
@@ -359,28 +394,28 @@ global_positions=global_positions.iloc[:-1]
 # latest_fx = fx_multipliers.reindex(eu_data.price_ret.index).ffill().loc[last_date]
 
 # eu_exec = pd.DataFrame({
-#     'internal_code': eu_active.index,
-#     'currency': [eu_data.currency_dict.get(ric, 'EUR').upper() for ric in eu_active.index], 
-#     'target_notional_usd': eu_active.values
+# 'internal_code': eu_active.index,
+# 'currency': [eu_data.currency_dict.get(ric, 'EUR').upper() for ric in eu_active.index],
+# 'target_notional_usd': eu_active.values
 # })
 
+# us_exec['target_notional'].abs().sum()
+
+  
 # def get_local_notional_fixed(row):
 #     raw_curr = row['currency']
 #     fx_col = f"{raw_curr}="
-    
 #     # Check if we have the specific rate, otherwise fallback to EUR
 #     rate = latest_fx.get(fx_col, latest_fx.get('EUR=', 1.0))
 #     local_val = row['target_notional_usd'] / rate
-    
 #     # PER USER INSTRUCTIONS: GBp is already correct as GBP value, so no /100 needed.
 #     return local_val
 
 # eu_exec['target_notional'] = eu_exec.apply(get_local_notional_fixed, axis=1).round(2)
 # eu_exec['currency'] = eu_exec['currency'].apply(lambda x: 'GBP' if x == 'GBP' else x) # Ensure clean label
 # eu_exec = eu_exec[['internal_code', 'currency', 'target_notional']]
-# eu_exec.to_csv('target_notionals_eu_t_plus_1.csv', index=False)
+# eu_exec.to_csv(f'/Users/giladfibeesh/Documents/Python/qrt_academy/EUR/{todays_date}.csv', index=False)
 # print(f"Saved {len(eu_exec)} EU target positions.")
-
 # =================================================================================
 # 5. GLOBAL BACKTESTING & ADVANCED REPORTING
 # =================================================================================
@@ -454,8 +489,7 @@ print(f"  Total Financing:      ${total_financing:,.2f}")
 print(f"  Total Friction Drag:  ${(total_tcosts + total_financing):,.2f}")
 
 # --- PLOTTING ---
-# ---> CHANGED: Increased to 6 subplots and taller figsize
-fig, axes = plt.subplots(6, 1, figsize=(14, 24), sharex=True)
+fig, axes = plt.subplots(8, 1, figsize=(14, 32), sharex=True)
 
 # 1. Cumulative PnL & Drawdown
 cum_pnl.plot(ax=axes[0], color='forestgreen', lw=2, label='Cumulative PnL')
@@ -472,9 +506,18 @@ axes[1].set_title('Dynamic Regional Allocation (Softmax + Prior Blending)')
 axes[1].set_ylabel('Capital Weight')
 axes[1].set_ylim(0, 1)
 
-# 3. Scale Factor
-vol_scale_factor.plot(ax=axes[2], color='purple', lw=2)
-axes[2].set_title('Global Volatility Diversification Multiplier')
+# 3. Rolling Annualised Volatility: US, EU, Combined (actual held positions)
+us_pnl_actual  = (us_global_final.shift(1) * us_tot_ret).sum(axis=1)
+eu_pnl_actual  = (eu_global_final.shift(1) * eu_tot_ret).sum(axis=1)
+roll_vol_us  = us_pnl_actual.rolling(60).std() * np.sqrt(252)
+roll_vol_eu  = eu_pnl_actual.rolling(60).std() * np.sqrt(252)
+roll_vol_all = net_pnl.rolling(60).std() * np.sqrt(252)
+pd.DataFrame({'US': roll_vol_us, 'EU': roll_vol_eu, 'Combined': roll_vol_all}).plot(
+    ax=axes[2], color=['steelblue', 'darkorange', 'forestgreen'], lw=1.5)
+axes[2].axhline(config.PARAMS['TARGET_ANN_VOL'], color='red', ls='--', alpha=0.6, label='Target Vol')
+axes[2].set_title('Rolling 60-Day Annualised Risk (USD) — US / EU / Combined')
+axes[2].set_ylabel('Ann. Vol (USD)')
+axes[2].legend(loc='upper left')
 axes[2].grid(True, alpha=0.3)
 
 # 4. Rolling Sharpe
@@ -485,22 +528,38 @@ axes[3].axhline(0, color='black', ls='--', alpha=0.4)
 axes[3].axhline(1, color='green', ls='--', alpha=0.4)
 axes[3].grid(True, alpha=0.3)
 
-# ---> NEW: 5. US Signal Weights
-# Align the weights to the common_dates to keep the x-axis consistent
-us_weights_aligned = us_weights.loc[common_dates].ffill()
-us_weights_aligned.plot(ax=axes[4], kind='area', stacked=True, colormap='tab10', alpha=0.7)
-axes[4].set_title('US Internal Signal Allocation (Softmax Weights)')
-axes[4].set_ylabel('Signal Weight')
-axes[4].set_ylim(0, 1)
-axes[4].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+# 5. Gross Notional: US and EU
+us_gross = us_global_final.abs().sum(axis=1)
+eu_gross = eu_global_final.abs().sum(axis=1)
+pd.DataFrame({'US Gross': us_gross, 'EU Gross': eu_gross}).plot(
+    ax=axes[4], color=['steelblue', 'darkorange'], lw=1.5)
+axes[4].set_title('Gross Notional Exposure (USD) — US vs EU')
+axes[4].set_ylabel('Gross Notional (USD)')
+axes[4].legend(loc='upper left')
+axes[4].grid(True, alpha=0.3)
 
-# ---> NEW: 6. EU Signal Weights
-eu_weights_aligned = eu_weights.loc[common_dates].ffill()
-eu_weights_aligned.plot(ax=axes[5], kind='area', stacked=True, colormap='tab10', alpha=0.7)
-axes[5].set_title('EU Internal Signal Allocation (Softmax Weights)')
+# 6. US Signal Weights
+us_weights_aligned = us_weights.loc[common_dates].ffill()
+us_weights_aligned.plot(ax=axes[5], kind='area', stacked=True, colormap='tab10', alpha=0.7)
+axes[5].set_title('US Internal Signal Allocation (Equal Weights)')
 axes[5].set_ylabel('Signal Weight')
 axes[5].set_ylim(0, 1)
 axes[5].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+# 7. EU Signal Weights
+eu_weights_aligned = eu_weights.loc[common_dates].ffill()
+eu_weights_aligned.plot(ax=axes[6], kind='area', stacked=True, colormap='tab10', alpha=0.7)
+axes[6].set_title('EU Internal Signal Allocation (Softmax Weights)')
+axes[6].set_ylabel('Signal Weight')
+axes[6].set_ylim(0, 1)
+axes[6].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+# 8. Vol Scale Factor (kept for reference)
+vol_scale_factor.plot(ax=axes[7], color='purple', lw=2)
+axes[7].set_title('Global Volatility Diversification Multiplier')
+axes[7].grid(True, alpha=0.3)
+
+
 
 plt.tight_layout()
 plt.show()
