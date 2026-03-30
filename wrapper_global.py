@@ -78,14 +78,28 @@ def run_regional_pipeline(region='US'):
             smoothing_span=cfg['volume']['smoothing_span']
         ).generate(data.hedged_returns, data.volume_usd) * get_sign(ic_volume)
 
-        # Equal-weight blend: momentum + EPS revision + volume conviction
-        final_signals = robust_cross_sectional_norm(sig_long + sig_eps + sig_volume)
+        # Price Target revision signal (1-day lag for look-ahead safety)
+        pt_files = sorted(glob.glob(os.path.join('.', 'Hist_data_Russel3000', 'Other', 'lseg_multi_data_*_ADVfiltered.csv')))
+        pt_raw = pd.concat([pd.read_csv(f, encoding='utf-8-sig') for f in pt_files], ignore_index=True)
+        pt_raw['Date'] = pd.to_datetime(pt_raw['Date'])
+        pt_raw = pt_raw.sort_values(['Date','RIC']).drop_duplicates(subset=['Date','RIC'], keep='last')
+        pt_pivot = pt_raw.pivot_table(index='Date', columns='RIC', values='Price Target - Mean', aggfunc='last').sort_index()
+        pt_common = data.hedged_returns.columns.intersection(pt_pivot.columns)
+        pt_lagged = pt_pivot[pt_common].reindex(data.hedged_returns.index).ffill().shift(1)
+        pt_prev = pt_lagged.shift(63)
+        pt_rev = ((pt_lagged - pt_prev) / (pt_prev.abs() + 0.01)).clip(-1.0, 1.0)
+        sig_pt = robust_cross_sectional_norm(pt_rev.ewm(span=3, min_periods=1).mean())
+        sig_pt = sig_pt.reindex(columns=data.hedged_returns.columns, fill_value=0.0)
+        print(f"  -> Generating Price Target Revision Signal (63d window)...")
+
+        # Equal-weight blend: momentum + EPS revision + volume conviction + price target
+        final_signals = robust_cross_sectional_norm(sig_long + sig_eps + sig_volume + sig_pt)
         historical_weights = pd.DataFrame(
-            {"long": 1/3, "eps_rev": 1/3, "volume": 1/3},
+            {"long": 1/4, "eps_rev": 1/4, "volume": 1/4, "pt_rev": 1/4},
             index=data.hedged_returns.index
         )
-        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon'] + cfg['volume']['horizon']) / 3
-        print(f"[US] Equal-weight: long + eps_rev + volume (long-only + index hedge)")
+        avg_horizon = (cfg['long_term']['horizon'] + cfg['eps_revision']['horizon'] + cfg['volume']['horizon'] + 21) / 4
+        print(f"[US] Equal-weight: long + eps_rev + volume + pt_rev (long-only + index hedge)")
 
     else:
         # =================================================================
@@ -134,14 +148,29 @@ def run_regional_pipeline(region='US'):
             ).generate(data.hedged_returns, data.betas) * get_sign(ic_def)
         }
 
-        abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_volume), abs(ic_regime), abs(ic_def)]
+        # Recommendation change signal (1-day lag for look-ahead safety)
+        rec_files = sorted(glob.glob(os.path.join('.', 'Hist_data_Stoxx600', 'Other', 'stoxx_multi_data_*.csv')))
+        rec_raw = pd.concat([pd.read_csv(f, encoding='utf-8-sig') for f in rec_files], ignore_index=True)
+        rec_raw['Date'] = pd.to_datetime(rec_raw['Date'])
+        rec_raw = rec_raw.sort_values(['Date','RIC']).drop_duplicates(subset=['Date','RIC'], keep='last')
+        rec_pivot = rec_raw.pivot_table(index='Date', columns='RIC', values='Recommendation - Mean (1-5)', aggfunc='last').sort_index()
+        rec_common = data.hedged_returns.columns.intersection(rec_pivot.columns)
+        rec_lagged = rec_pivot[rec_common].reindex(data.hedged_returns.index).ffill().shift(1)
+        rec_prev = rec_lagged.shift(63)
+        rec_change = (rec_lagged - rec_prev).clip(-2.0, 2.0).ewm(span=3, min_periods=1).mean()
+        sig_rec = robust_cross_sectional_norm(-rec_change)  # negate: decrease in rec = upgrade = positive
+        sig_rec = sig_rec.reindex(columns=data.hedged_returns.columns, fill_value=0.0)
+        signal_dict["rec_change"] = sig_rec
+        print(f"  -> Generating Recommendation Change Signal (63d window)...")
+
+        abs_ics = [abs(ic_short), abs(ic_long), abs(ic_pca), abs(ic_volume), abs(ic_regime), abs(ic_def), 0.02]
         total_abs_ic = sum(abs_ics)
         if total_abs_ic == 0:
             raise ValueError(f"[EU] All signals have zero IC!")
         priors = [ic / total_abs_ic for ic in abs_ics]
 
         print(f"[EU] Flipped? Short: {'Yes' if ic_short < 0 else 'No'}, Def: {'Yes' if ic_def < 0 else 'No'}, HMM: {'Yes' if ic_regime < 0 else 'No'}")
-        print(f"[EU] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Vol:{priors[3]:.2f}, HMM:{priors[4]:.2f}, Def:{priors[5]:.2f}")
+        print(f"[EU] Priors: Short:{priors[0]:.2f}, Long:{priors[1]:.2f}, PCA:{priors[2]:.2f}, Vol:{priors[3]:.2f}, HMM:{priors[4]:.2f}, Def:{priors[5]:.2f}, Rec:{priors[6]:.2f}")
 
         blender = RobustRegressionBlender(lookback=252, temperature=1.5)
         final_signals = blender.blend(signal_dict, data.hedged_returns, prior_weights=priors)
@@ -152,7 +181,8 @@ def run_regional_pipeline(region='US'):
             (cfg['pca']['horizon'] * priors[2]) +
             (cfg['volume']['horizon'] * priors[3]) +
             (cfg['hmm']['horizon'] * priors[4]) +
-            (cfg['defensive']['horizon'] * priors[5])
+            (cfg['defensive']['horizon'] * priors[5]) +
+            (21 * priors[6])
         )
 
     dynamic_trade_speed = max(0.05, min(1.0, 2.0 / (avg_horizon + 1)))
