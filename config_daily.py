@@ -51,7 +51,9 @@ PRICE_FILES = [
     os.path.join(PRICE_DIR, 'lseg_historyprice_data_20240828_to_20230320_ADVfiltered.csv'),
     os.path.join(PRICE_DIR, 'lseg_historyprice_data_20260214_to_20240829_ADVfiltered.csv'),
     os.path.join(PRICE_DIR, 'lseg_historyprice_data_20260324_to_20260212_ADVfiltered.csv'),
-    os.path.join(NEW_DATA_DIR, 'lseg_historyprice_data_now_to_20260324_ADVfiltered.csv')
+    os.path.join(NEW_DATA_DIR, 'lseg_historyprice_data_now_to_20260324_ADVfiltered.csv'),
+    os.path.join(PRICE_DIR, 'lseg_historyprice_data_20260329_to_20200101_Added.csv'),
+    os.path.join(PRICE_DIR, 'lseg_historyprice_data_20200101_to_20150101_Added.csv')
 ]
 
 PE_FILES = [
@@ -63,7 +65,8 @@ PE_FILES = [
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20230320_to_20211001_ADVfiltered.csv'),
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20260215_to_20230321_ADVfiltered.csv'),
     os.path.join(PE_DIR, 'lseg_Price-Earning_data_20260324_to_20260212_ADVfiltered.csv'),
-    os.path.join(NEW_DATA_DIR, 'lseg_Price-Earning_data_now_to_20260324_ADVfiltered.csv')
+    os.path.join(NEW_DATA_DIR, 'lseg_Price-Earning_data_now_to_20260324_ADVfiltered.csv'),
+    os.path.join(PE_DIR, 'lseg_Price-Earning_data_20260329_to_20150101_Added.csv')
 ]
 
 SP_FILES = [
@@ -81,7 +84,8 @@ EPS_EST_FILES = [
     os.path.join(EPS_EST_DIR, 'lseg_EPSestimate_data_20240930_to_20230419_ADVfiltered.csv'),
     os.path.join(EPS_EST_DIR, 'lseg_EPSestimate_data_20260319_to_20241001_ADVfiltered.csv'),
     os.path.join(EPS_EST_DIR, 'lseg_EPSestimate_data_20260324_to_20260212_ADVfiltered.csv'),
-    os.path.join(NEW_DATA_DIR, 'lseg_EPSestimate_data_now_to_20260324_ADVfiltered.csv')
+    os.path.join(NEW_DATA_DIR, 'lseg_EPSestimate_data_now_to_20260324_ADVfiltered.csv'),
+    os.path.join(EPS_EST_DIR, 'lseg_EPSestimate_data_20260329_to_20150101_Added.csv')
 ]
 
 STATIC_FILE = os.path.join(STATIC_DIR, 'lseg_static_data_20260216.csv')
@@ -110,7 +114,8 @@ EU_PRICE_FILES = [
     os.path.join(EU_PRICE_DIR, 'stoxx_historyprice_data_20231231_to_20230101.csv'),
     os.path.join(EU_PRICE_DIR, 'stoxx_historyprice_data_20260219_to_20240101.csv'),
     os.path.join(EU_PRICE_DIR, 'stoxx_historyprice_data_20260324_to_20260219.csv'),
-    os.path.join(NEW_EUR_DATA_DIR, 'stoxx_historyprice_data_now_to_20260324.csv')
+    os.path.join(NEW_EUR_DATA_DIR, 'stoxx_historyprice_data_now_to_20260324.csv'),
+    os.path.join(EU_PRICE_DIR, 'stoxx_historyprice_data_20260329_to_20150101_Added.csv')
 ]
 
 EU_PE_FILES = [
@@ -123,7 +128,8 @@ EU_PE_FILES = [
     os.path.join(EU_PE_DIR, 'stoxx_Price-Earning_data_20231231_to_20220101.csv'),
     os.path.join(EU_PE_DIR, 'stoxx_Price-Earning_data_20260219_to_20240101.csv'),
     os.path.join(EU_PE_DIR, 'stoxx_Price-Earning_data_20260324_to_20260219.csv'),
-    os.path.join(NEW_EUR_DATA_DIR, 'stoxx_Price-Earning_data_now_to_20260324.csv')
+    os.path.join(NEW_EUR_DATA_DIR, 'stoxx_Price-Earning_data_now_to_20260324.csv'),
+    os.path.join(EU_PE_DIR, 'stoxx_Price-Earning_data_20260329_to_20150101_Added.csv')
 ]
 
 EU_FX_FILES = [os.path.join(EU_BASE_DIR, 'History_currency', 'currency_data_20260219_to_20150101.csv'),
@@ -134,7 +140,5 @@ EU_BENCHMARK_FILES = [
     os.path.join(EU_BASE_DIR, 'Eurostoxx50','stoxx_historyprice_Eurostoxx50_20260324_to_20260219.csv'), 
     os.path.join(NEW_EUR_DATA_DIR, 'stoxx_historyprice_Eurostoxx50_now_to_20260324.csv')
 ]
-EU_STATIC_FILE = os.path.join(EU_STATIC_DIR, 'stoxx_static_data_20260220.csv')
-
-# --- EU EPS Estimate Data ---
+EU_STATIC_FILE = os.path.join(EU_STATIC_DIR, 'stoxx_static_data_20260330.csv')
 EU_EPS_DIR = os.path.join(EU_BASE_DIR, 'History_EPS_estimate')
