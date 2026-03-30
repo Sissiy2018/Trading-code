@@ -48,9 +48,11 @@ def run_regional_pipeline(region='US'):
         # =================================================================
         # US STRATEGY: 3 signals (long, eps_rev, volume), equal-weight, no blender
         # =================================================================
-        # Load EPS data (US only)
-        eps_files = sorted([f for f in glob.glob(os.path.join(config.EPS_DIR, '*.csv')) if 'ADVfiltered' not in f])
-        print(f"[US] Loading {len(eps_files)} EPS estimate files...")
+        # Load EPS data (US only) — include Daily_new_data for latest estimates
+        eps_hist = sorted([f for f in glob.glob(os.path.join(config.EPS_DIR, '*.csv')) if 'ADVfiltered' not in f])
+        eps_daily = sorted([f for f in glob.glob(os.path.join(config.NEW_DATA_DIR, '*EPSestimate*now*.csv')) if 'ADVfiltered' not in f])
+        eps_files = eps_hist + [f for f in eps_daily if f not in eps_hist]
+        print(f"[US] Loading {len(eps_files)} EPS estimate files (incl. daily updates)...")
         eps_raw = pd.concat([pd.read_csv(f) for f in eps_files], ignore_index=True)
         eps_raw['Date'] = pd.to_datetime(eps_raw['Date'])
         eps_raw = eps_raw.sort_values(['Date', 'RIC']).drop_duplicates(subset=['Date', 'RIC'], keep='last')
@@ -79,7 +81,9 @@ def run_regional_pipeline(region='US'):
         ).generate(data.hedged_returns, data.volume_usd) * get_sign(ic_volume)
 
         # Price Target revision signal (1-day lag for look-ahead safety)
+        # Include both History and Daily_new_data for freshest estimates
         pt_files = sorted(glob.glob(os.path.join('.', 'Hist_data_Russel3000', 'Other', 'lseg_multi_data_*_ADVfiltered.csv')))
+        pt_files += sorted(glob.glob(os.path.join(config.NEW_DATA_DIR, '*multi_data*now*.csv')))
         pt_raw = pd.concat([pd.read_csv(f, encoding='utf-8-sig') for f in pt_files], ignore_index=True)
         pt_raw['Date'] = pd.to_datetime(pt_raw['Date'])
         pt_raw = pt_raw.sort_values(['Date','RIC']).drop_duplicates(subset=['Date','RIC'], keep='last')
@@ -149,7 +153,9 @@ def run_regional_pipeline(region='US'):
         }
 
         # Recommendation change signal (1-day lag for look-ahead safety)
+        # Include both History and Daily_new_data for freshest estimates
         rec_files = sorted(glob.glob(os.path.join('.', 'Hist_data_Stoxx600', 'Other', 'stoxx_multi_data_*.csv')))
+        rec_files += sorted(glob.glob(os.path.join(config.NEW_EUR_DATA_DIR, '*multi_data*now*.csv')))
         rec_raw = pd.concat([pd.read_csv(f, encoding='utf-8-sig') for f in rec_files], ignore_index=True)
         rec_raw['Date'] = pd.to_datetime(rec_raw['Date'])
         rec_raw = rec_raw.sort_values(['Date','RIC']).drop_duplicates(subset=['Date','RIC'], keep='last')
