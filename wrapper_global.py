@@ -291,8 +291,8 @@ dynamic_weight_eu = exp_eu / (exp_us + exp_eu)
 
 # --- NEW: BAYESIAN PRIOR BLENDING ---
 # 1. Define your structural base weights
-prior_us = 0.3
-prior_eu = 0.7
+prior_us = 0.4
+prior_eu = 0.6
 
 # 2. Define how strongly you trust the prior vs. the dynamic momentum (0.0 to 1.0)
 #    0.0 = Fully dynamic (ignores prior), 1.0 = Fully static (pegs to prior)
@@ -329,26 +329,31 @@ eu_global_final = eu_pos_weighted.multiply(vol_scale_factor, axis=0)
 
 # Combine into one massive global position matrix
 global_positions = pd.concat([us_global_final, eu_global_final], axis=1)
-global_positions=global_positions.iloc[:-1]
-# =================================================================================
-# 4. LIVE EXECUTION EXPORT (US AND EU)
+# global_positions=global_positions.iloc[:-1]
 # =================================================================================
 # print("\n========================================")
-# print("         PHASE 4: LIVE EXECUTION EXPORT")
+# print(" PHASE 4: LIVE EXECUTION EXPORT")
 # print("========================================")
 # last_date = common_dates[-1]
 # print(f"Valid global signals generated for date: {last_date.date()}")
 # print(f"Current Global Allocation -> US: {weight_us.iloc[-1]:.1%}, EU: {weight_eu.iloc[-1]:.1%} (Scale Factor: {vol_scale_factor.iloc[-1]:.2f}x)")
-
+# todays_date= '2026-03-30'
 # # --- US EXPORT ---
 # us_active = us_global_final.iloc[-1]
 # # us_active = us_active[us_active != 0].copy()
 # us_exec = pd.DataFrame({
-#     'internal_code': us_active.index,
-#     'currency': 'USD',
-#     'target_notional': us_active.values.round(2)
+# 'internal_code': us_active.index,
+# 'currency': 'USD',
+# 'target_notional': us_active.values.round(2)
 # })
-# us_exec.to_csv('target_notionals_us_t_plus_1.csv', index=False)
+
+# past=pd.read_csv('/Users/giladfibeesh/Documents/Python/qrt_academy/US/2026-03-20.csv')
+# list(past['internal_code'])
+# missing=set(past['internal_code'])-set(us_exec['internal_code'])
+# # add missing 0.0 target_notional to all the missing ones:
+# for code in missing:
+#     us_exec.loc[len(us_exec)] = [code, 'USD', 0.0]
+# us_exec.to_csv(f'/Users/giladfibeesh/Documents/Python/qrt_academy/US/{todays_date}.csv', index=False)
 # print(f"Saved {len(us_exec)} US target positions.")
 
 # # --- EU EXPORT (With FX Translation) ---
@@ -359,28 +364,28 @@ global_positions=global_positions.iloc[:-1]
 # latest_fx = fx_multipliers.reindex(eu_data.price_ret.index).ffill().loc[last_date]
 
 # eu_exec = pd.DataFrame({
-#     'internal_code': eu_active.index,
-#     'currency': [eu_data.currency_dict.get(ric, 'EUR').upper() for ric in eu_active.index], 
-#     'target_notional_usd': eu_active.values
+# 'internal_code': eu_active.index,
+# 'currency': [eu_data.currency_dict.get(ric, 'EUR').upper() for ric in eu_active.index],
+# 'target_notional_usd': eu_active.values
 # })
 
+# us_exec['target_notional'].abs().sum()
+
+  
 # def get_local_notional_fixed(row):
 #     raw_curr = row['currency']
 #     fx_col = f"{raw_curr}="
-    
 #     # Check if we have the specific rate, otherwise fallback to EUR
 #     rate = latest_fx.get(fx_col, latest_fx.get('EUR=', 1.0))
 #     local_val = row['target_notional_usd'] / rate
-    
 #     # PER USER INSTRUCTIONS: GBp is already correct as GBP value, so no /100 needed.
 #     return local_val
 
 # eu_exec['target_notional'] = eu_exec.apply(get_local_notional_fixed, axis=1).round(2)
 # eu_exec['currency'] = eu_exec['currency'].apply(lambda x: 'GBP' if x == 'GBP' else x) # Ensure clean label
 # eu_exec = eu_exec[['internal_code', 'currency', 'target_notional']]
-# eu_exec.to_csv('target_notionals_eu_t_plus_1.csv', index=False)
+# eu_exec.to_csv(f'/Users/giladfibeesh/Documents/Python/qrt_academy/EUR/{todays_date}.csv', index=False)
 # print(f"Saved {len(eu_exec)} EU target positions.")
-
 # =================================================================================
 # 5. GLOBAL BACKTESTING & ADVANCED REPORTING
 # =================================================================================
@@ -454,8 +459,7 @@ print(f"  Total Financing:      ${total_financing:,.2f}")
 print(f"  Total Friction Drag:  ${(total_tcosts + total_financing):,.2f}")
 
 # --- PLOTTING ---
-# ---> CHANGED: Increased to 6 subplots and taller figsize
-fig, axes = plt.subplots(6, 1, figsize=(14, 24), sharex=True)
+fig, axes = plt.subplots(8, 1, figsize=(14, 32), sharex=True)
 
 # 1. Cumulative PnL & Drawdown
 cum_pnl.plot(ax=axes[0], color='forestgreen', lw=2, label='Cumulative PnL')
@@ -472,9 +476,18 @@ axes[1].set_title('Dynamic Regional Allocation (Softmax + Prior Blending)')
 axes[1].set_ylabel('Capital Weight')
 axes[1].set_ylim(0, 1)
 
-# 3. Scale Factor
-vol_scale_factor.plot(ax=axes[2], color='purple', lw=2)
-axes[2].set_title('Global Volatility Diversification Multiplier')
+# 3. Rolling Annualised Volatility: US, EU, Combined (actual held positions)
+us_pnl_actual  = (us_global_final.shift(1) * us_tot_ret).sum(axis=1)
+eu_pnl_actual  = (eu_global_final.shift(1) * eu_tot_ret).sum(axis=1)
+roll_vol_us  = us_pnl_actual.rolling(60).std() * np.sqrt(252)
+roll_vol_eu  = eu_pnl_actual.rolling(60).std() * np.sqrt(252)
+roll_vol_all = net_pnl.rolling(60).std() * np.sqrt(252)
+pd.DataFrame({'US': roll_vol_us, 'EU': roll_vol_eu, 'Combined': roll_vol_all}).plot(
+    ax=axes[2], color=['steelblue', 'darkorange', 'forestgreen'], lw=1.5)
+axes[2].axhline(config.PARAMS['TARGET_ANN_VOL'], color='red', ls='--', alpha=0.6, label='Target Vol')
+axes[2].set_title('Rolling 60-Day Annualised Risk (USD) — US / EU / Combined')
+axes[2].set_ylabel('Ann. Vol (USD)')
+axes[2].legend(loc='upper left')
 axes[2].grid(True, alpha=0.3)
 
 # 4. Rolling Sharpe
@@ -485,22 +498,38 @@ axes[3].axhline(0, color='black', ls='--', alpha=0.4)
 axes[3].axhline(1, color='green', ls='--', alpha=0.4)
 axes[3].grid(True, alpha=0.3)
 
-# ---> NEW: 5. US Signal Weights
-# Align the weights to the common_dates to keep the x-axis consistent
-us_weights_aligned = us_weights.loc[common_dates].ffill()
-us_weights_aligned.plot(ax=axes[4], kind='area', stacked=True, colormap='tab10', alpha=0.7)
-axes[4].set_title('US Internal Signal Allocation (Softmax Weights)')
-axes[4].set_ylabel('Signal Weight')
-axes[4].set_ylim(0, 1)
-axes[4].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+# 5. Gross Notional: US and EU
+us_gross = us_global_final.abs().sum(axis=1)
+eu_gross = eu_global_final.abs().sum(axis=1)
+pd.DataFrame({'US Gross': us_gross, 'EU Gross': eu_gross}).plot(
+    ax=axes[4], color=['steelblue', 'darkorange'], lw=1.5)
+axes[4].set_title('Gross Notional Exposure (USD) — US vs EU')
+axes[4].set_ylabel('Gross Notional (USD)')
+axes[4].legend(loc='upper left')
+axes[4].grid(True, alpha=0.3)
 
-# ---> NEW: 6. EU Signal Weights
-eu_weights_aligned = eu_weights.loc[common_dates].ffill()
-eu_weights_aligned.plot(ax=axes[5], kind='area', stacked=True, colormap='tab10', alpha=0.7)
-axes[5].set_title('EU Internal Signal Allocation (Softmax Weights)')
+# 6. US Signal Weights
+us_weights_aligned = us_weights.loc[common_dates].ffill()
+us_weights_aligned.plot(ax=axes[5], kind='area', stacked=True, colormap='tab10', alpha=0.7)
+axes[5].set_title('US Internal Signal Allocation (Equal Weights)')
 axes[5].set_ylabel('Signal Weight')
 axes[5].set_ylim(0, 1)
 axes[5].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+# 7. EU Signal Weights
+eu_weights_aligned = eu_weights.loc[common_dates].ffill()
+eu_weights_aligned.plot(ax=axes[6], kind='area', stacked=True, colormap='tab10', alpha=0.7)
+axes[6].set_title('EU Internal Signal Allocation (Softmax Weights)')
+axes[6].set_ylabel('Signal Weight')
+axes[6].set_ylim(0, 1)
+axes[6].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+# 8. Vol Scale Factor (kept for reference)
+vol_scale_factor.plot(ax=axes[7], color='purple', lw=2)
+axes[7].set_title('Global Volatility Diversification Multiplier')
+axes[7].grid(True, alpha=0.3)
+
+
 
 plt.tight_layout()
 plt.show()
