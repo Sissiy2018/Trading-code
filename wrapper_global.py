@@ -497,10 +497,20 @@ print(f"  Total Friction Drag:  ${(total_tcosts + total_financing):,.2f}")
 # --- PLOTTING ---
 fig, axes = plt.subplots(8, 1, figsize=(14, 32), sharex=True)
 
-# 1. Cumulative PnL & Drawdown
-cum_pnl.plot(ax=axes[0], color='forestgreen', lw=2, label='Cumulative PnL')
+# 1. Cumulative PnL (US, EU, Combined) with Drawdown
+# Calculate cumulative PnL for US and EU separately
+us_pnl_actual  = (us_global_final.shift(1) * us_tot_ret).sum(axis=1)
+eu_pnl_actual  = (eu_global_final.shift(1) * eu_tot_ret).sum(axis=1)
+us_cum_pnl = us_pnl_actual.cumsum()
+eu_cum_pnl = eu_pnl_actual.cumsum()
+
+# Plot all three cumulative PnL lines
+axes[0].plot(us_cum_pnl.index, us_cum_pnl.values, color='steelblue', lw=2, label='US Cumulative PnL')
+axes[0].plot(eu_cum_pnl.index, eu_cum_pnl.values, color='darkorange', lw=2, label='EU Cumulative PnL')
+axes[0].plot(cum_pnl.index, cum_pnl.values, color='forestgreen', lw=2, label='Combined Cumulative PnL')
+# Add drawdown fill
 axes[0].fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3, label='Drawdown')
-axes[0].set_title('Global Portfolio: Cumulative Net PnL vs Drawdown (USD)')
+axes[0].set_title('Cumulative PnL: US vs EU vs Combined (USD)')
 axes[0].axhline(0, color='black', ls='--', alpha=0.4)
 axes[0].legend(loc='upper left')
 axes[0].grid(True, alpha=0.3)
@@ -513,8 +523,8 @@ axes[1].set_ylabel('Capital Weight')
 axes[1].set_ylim(0, 1)
 
 # 3. Rolling Annualised Volatility: US, EU, Combined (actual held positions)
-us_pnl_actual  = (us_global_final.shift(1) * us_tot_ret).sum(axis=1)
-eu_pnl_actual  = (eu_global_final.shift(1) * eu_tot_ret).sum(axis=1)
+#us_pnl_actual  = (us_global_final.shift(1) * us_tot_ret).sum(axis=1)
+#eu_pnl_actual  = (eu_global_final.shift(1) * eu_tot_ret).sum(axis=1)
 roll_vol_us  = us_pnl_actual.rolling(60).std() * np.sqrt(252)
 roll_vol_eu  = eu_pnl_actual.rolling(60).std() * np.sqrt(252)
 roll_vol_all = net_pnl.rolling(60).std() * np.sqrt(252)
